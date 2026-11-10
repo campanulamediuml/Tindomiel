@@ -1,0 +1,12 @@
+.tools/
+node_modules/
+dist/
+target/
+*.log
+server/data/profiles.json
+server/tindomiel-server
+web/dist/
+shell/target/
+shell/resources/tindomiel-server
+shell/gen/
+.DS_Store

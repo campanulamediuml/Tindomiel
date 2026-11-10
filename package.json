@@ -1,0 +1,16 @@
+{
+  "name": "tindomiel",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev:web": "npm --prefix web run dev",
+    "dev:server": "cd server && go run ./cmd/tindomiel-server",
+    "build:web": "npm --prefix web run build",
+    "build:server": "cd server && go build -o ../shell/resources/tindomiel-server ./cmd/tindomiel-server",
+    "tauri:dev": "npm run build:server && tauri dev --config shell/tauri.conf.json",
+    "tauri:build": "tauri build --config shell/tauri.conf.json && codesign --force --deep --sign - shell/target/release/bundle/macos/Tindomiel.app"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

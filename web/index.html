@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Tindomiel</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="toolbar">
+        <div id="connection-actions">
+          <button id="new-connection" class="icon-button connection-add" title="SSH 连接">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-7l-2-2H5a2 2 0 0 0-2 2z"/><path d="M15 13h6M18 10v6"/></svg>
+            <span class="dropdown-caret">▾</span>
+          </button>
+          <div id="connection-menu" hidden>
+            <button id="menu-new-profile">新建 SSH 连接</button>
+            <button id="menu-open-manager">连接管理器</button>
+            <button id="menu-new-folder">新建文件夹</button>
+          </div>
+        </div>
+        <button id="reconnect" hidden>重新连接</button>
+        <div class="toolbar-spacer"></div>
+        <button id="download-path" title="在 Finder 中打开默认下载目录">下载：—</button>
+        <button id="choose-download-path" class="link-button" title="选择下载目录">更改</button>
+        <button id="logs-button" title="后端日志">日志</button>
+        <button id="transfers-button" title="文件传输进度">传输 <span id="transfer-count" hidden>0</span></button>
+        <span id="connection-status" class="status offline">未连接</span>
+      </header>
+      <nav class="tabbar" aria-label="SSH 会话标签">
+        <div id="tabs"></div>
+        <button id="new-tab" title="新建连接">＋</button>
+      </nav>
+      <main class="workspace">
+        <div class="top-workspace">
+          <aside id="metrics-panel">
+            <div class="target-ip"><strong id="target-ip">IP —</strong><button id="copy-ip" class="link-button">复制</button></div>
+            <button id="system-info-button" class="panel-title" type="button">系统信息</button>
+            <div id="system-uptime" class="metric-line">运行 —</div>
+            <div id="system-load" class="metric-line">负载 —</div>
+            <div class="resource-row"><span>CPU</span><span id="cpu-text">—</span></div>
+            <div class="meter"><div id="cpu-bar"></div></div>
+            <div class="resource-row"><span>内存</span><span id="memory-text">—</span></div>
+            <div class="meter"><div id="memory-bar"></div></div>
+            <div class="resource-row"><span>交换</span><span id="swap-text">—</span></div>
+            <div class="meter"><div id="swap-bar"></div></div>
+            <div class="process-header">
+              <button id="sort-memory">内存</button>
+              <button id="sort-cpu">CPU</button>
+              <span>命令</span>
+            </div>
+            <div id="process-list"></div>
+            <div class="chart-header"><span id="network-rates">↑ — ↓ —</span><select id="network-interface" aria-label="网卡"></select></div>
+            <canvas id="network-chart" height="72"></canvas>
+            <div class="chart-header"><span id="ping-text">— ms</span><span>本机</span></div>
+            <canvas id="ping-chart" height="48"></canvas>
+            <div class="disk-header"><span>路径</span><span>已用/总大小</span></div>
+            <div id="disk-list"></div>
+          </aside>
+          <section id="terminal-area">
+            <div id="welcome">
+              <p>创建或选择一个 SSH 连接开始。</p>
+              <button id="welcome-connect" class="primary">选择连接</button>
+            </div>
+          </section>
+        </div>
+        <div class="files-workspace">
+          <aside id="remote-tree-panel">
+            <div class="file-panel-header"><strong>远程目录</strong><button id="tree-refresh" title="刷新目录树">↻</button></div>
+            <div id="remote-tree"></div>
+          </aside>
+          <section id="sftp-panel">
+            <div class="sftp-toolbar">
+              <input id="sftp-path" aria-label="远程绝对路径" spellcheck="false" />
+              <button id="copy-path" title="复制绝对路径">复制</button>
+              <button id="sftp-refresh" title="刷新">↻</button>
+              <button id="sftp-up" title="上级目录">↑</button>
+              <button id="sftp-download" title="下载选中文件" disabled>下载</button>
+              <button id="sftp-upload" title="上传文件">上传</button>
+              <input id="upload-input" type="file" multiple hidden />
+            </div>
+            <div id="sftp-dropzone">
+              <div class="file-header"><span>文件名</span><span>大小</span><span>类型</span><span>修改时间</span><span>权限</span></div>
+              <div id="file-list"></div>
+              <div id="drop-hint">松开以上传到当前目录</div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <aside id="transfer-popover" hidden>
+      <div class="transfer-header"><strong>文件传输</strong><button id="clear-transfers" class="link-button">清除已完成</button></div>
+      <div id="global-transfer-list"></div>
+    </aside>
+
+    <dialog id="connection-dialog" class="manager-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2>连接管理器</h2>
+        <button value="cancel" aria-label="关闭">×</button>
+      </form>
+      <div class="manager-actions">
+        <button id="add-profile" type="button">＋ SSH连接</button>
+        <button id="add-folder" type="button">＋ 文件夹</button>
+        <input id="profile-search" type="search" placeholder="搜索名称、IP 或用户" aria-label="搜索名称、IP 或用户" />
+      </div>
+      <div id="profile-list" class="profile-list"></div>
+      <div id="profile-context-menu" hidden>
+        <button id="context-edit-profile">编辑连接</button>
+        <button id="context-add-to-folder">添加连接</button>
+      </div>
+    </dialog>
+
+    <dialog id="folder-dialog" class="folder-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2>新建文件夹</h2>
+        <button value="cancel" aria-label="关闭">×</button>
+      </form>
+      <form id="folder-form" class="folder-form">
+        <label>名称<input name="folderName" required placeholder="例如：家里的电脑" /></label>
+        <div class="form-actions"><button type="submit" class="primary">创建文件夹</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="profile-editor-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2 id="profile-editor-title">新建连接</h2>
+        <button value="cancel" aria-label="关闭">×</button>
+      </form>
+      <form id="profile-form">
+        <fieldset>
+          <legend>常规</legend>
+          <label>名称<input name="name" required placeholder="我的服务器" /></label>
+          <div class="form-row">
+            <label>主机<input name="host" required /></label>
+            <label class="port-field">端口<input name="port" type="number" value="22" min="1" max="65535" required /></label>
+          </div>
+          <label>备注<textarea name="remark" rows="2"></textarea></label>
+          <label>文件夹<select name="folder" id="profile-folder"><option value="">未分组</option></select></label>
+        </fieldset>
+        <fieldset>
+          <legend>认证</legend>
+          <label>方法<select name="auth" id="auth-method"><option value="publicKey">公钥</option><option value="password">密码</option></select></label>
+          <label>用户名<input name="user" required autocomplete="off" /></label>
+          <label>密码<input name="password" type="password" autocomplete="new-password" /></label>
+          <div class="key-header"><span>私钥（按顺序尝试）</span><button id="add-private-key" type="button">浏览…</button></div>
+          <div id="private-key-list"></div>
+          <label>私钥短语（如适用）<input name="privateKeyPassphrase" type="password" autocomplete="new-password" /></label>
+        </fieldset>
+        <div class="form-actions">
+          <button id="save-profile" type="button">保存</button>
+          <button type="submit" class="primary">保存并连接</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="host-key-dialog" class="host-key-dialog">
+      <div class="dialog-header"><h2>确认未知主机</h2></div>
+      <div class="host-key-content">
+        <p>首次连接此主机，请核对主机密钥指纹：</p>
+        <dl>
+          <div><dt>主机</dt><dd id="host-key-address"></dd></div>
+          <div><dt>密钥类型</dt><dd id="host-key-type"></dd></div>
+          <div><dt>指纹</dt><dd id="host-key-fingerprint"></dd></div>
+        </dl>
+        <p>信任后将写入 <code>~/.ssh/known_hosts</code> 并继续连接。</p>
+        <div class="form-actions">
+          <button id="host-key-cancel" type="button">取消</button>
+          <button id="host-key-accept" class="primary" type="button">信任并连接</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="delete-profile-dialog" class="delete-profile-dialog">
+      <div class="dialog-header"><h2>确认删除</h2></div>
+      <div class="delete-profile-content">
+        <p id="delete-profile-message"></p>
+        <div class="form-actions">
+          <button id="delete-profile-cancel" type="button">取消</button>
+          <button id="delete-profile-accept" class="danger-button" type="button">确认删除</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="logs-dialog" class="logs-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2>日志</h2>
+        <div class="dialog-actions"><button id="refresh-logs" type="button">刷新</button><button value="cancel" aria-label="关闭">×</button></div>
+      </form>
+      <div class="log-tabs"><button id="backend-log-tab" class="active" type="button">后端日志</button><button id="frontend-log-tab" type="button">界面日志</button></div>
+      <div class="log-path" id="log-path"></div>
+      <pre id="log-content"></pre>
+    </dialog>
+    <dialog id="metrics-dialog" class="metrics-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2>目标设备系统信息</h2>
+        <button value="cancel" aria-label="关闭">×</button>
+      </form>
+      <div id="metrics-dialog-content"></div>
+    </dialog>
+    <div id="file-context-menu" hidden>
+      <button id="context-open-default">默认应用打开</button>
+      <button id="context-open-with">选择应用打开…</button>
+    </div>
+    <div id="toast" role="status"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
