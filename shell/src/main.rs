@@ -37,7 +37,7 @@ fn main() {
                 .ok_or("main window config is missing")?;
             if let Some(monitor) = app.primary_monitor()? {
                 config.height =
-                    (f64::from(monitor.size().height) / monitor.scale_factor() * 0.8).round();
+                    (f64::from(monitor.size().height) / monitor.scale_factor() * 0.9).round();
             }
             WebviewWindowBuilder::from_config(app, &config)?.build()?;
             app.manage(state);

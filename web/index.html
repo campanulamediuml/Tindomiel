@@ -32,7 +32,7 @@
         <div id="tabs"></div>
         <button id="new-tab" title="新建连接">＋</button>
       </nav>
-      <main class="workspace">
+      <main id="workspace" class="workspace">
         <div class="top-workspace">
           <aside id="metrics-panel">
             <div class="target-ip"><strong id="target-ip">IP —</strong><button id="copy-ip" class="link-button">复制</button></div>
@@ -65,11 +65,14 @@
             </div>
           </section>
         </div>
-        <div class="files-workspace">
+        <div id="sidebar-resizer" class="resizer vertical-resizer" role="separator" aria-label="调整资源栏宽度"></div>
+        <div id="files-resizer" class="resizer horizontal-resizer" role="separator" aria-label="调整文件区高度"></div>
+        <div id="files-workspace" class="files-workspace">
           <aside id="remote-tree-panel">
             <div class="file-panel-header"><strong>远程目录</strong><button id="tree-refresh" title="刷新目录树">↻</button></div>
             <div id="remote-tree"></div>
           </aside>
+          <div id="tree-resizer" class="resizer vertical-resizer" role="separator" aria-label="调整目录树宽度"></div>
           <section id="sftp-panel">
             <div class="sftp-toolbar">
               <input id="sftp-path" aria-label="远程绝对路径" spellcheck="false" />
@@ -81,7 +84,13 @@
               <input id="upload-input" type="file" multiple hidden />
             </div>
             <div id="sftp-dropzone">
-              <div class="file-header"><span>文件名</span><span>大小</span><span>类型</span><span>修改时间</span><span>权限</span></div>
+              <div id="file-header" class="file-header">
+                <div class="file-header-cell"><button id="sort-file-name" class="column-label" type="button">文件名</button><span class="column-resizer" data-column="name"></span></div>
+                <div class="file-header-cell"><span>大小</span><span class="column-resizer" data-column="size"></span></div>
+                <div class="file-header-cell"><button id="sort-file-mtime" class="column-label" type="button">最近修改</button><span class="column-resizer" data-column="mtime"></span></div>
+                <div class="file-header-cell"><button id="sort-file-ctime" class="column-label" type="button">创建时间</button><span class="column-resizer" data-column="ctime"></span></div>
+                <div class="file-header-cell"><span>权限</span><span class="column-resizer" data-column="permissions"></span></div>
+              </div>
               <div id="file-list"></div>
               <div id="drop-hint">松开以上传到当前目录</div>
             </div>
@@ -199,6 +208,9 @@
     <div id="file-context-menu" hidden>
       <button id="context-open-default">默认应用打开</button>
       <button id="context-open-with">选择应用打开…</button>
+    </div>
+    <div id="tab-context-menu" hidden>
+      <button id="tab-reconnect">重连</button>
     </div>
     <div id="toast" role="status"></div>
     <script type="module" src="/src/main.ts"></script>

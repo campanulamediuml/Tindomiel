@@ -60,13 +60,14 @@ func (m *Manager) Create(ctx context.Context, profileID string, cols, rows int) 
 		return nil, err
 	}
 	session := &Session{
-		id:       sessionID(),
-		profile:  profile,
-		manager:  m,
-		status:   Connecting,
-		openedAt: time.Now(),
-		cols:     cols,
-		rows:     rows,
+		id:          sessionID(),
+		profile:     profile,
+		manager:     m,
+		status:      Connecting,
+		openedAt:    time.Now(),
+		cols:        cols,
+		rows:        rows,
+		monitorStop: make(chan struct{}),
 	}
 	session.editors = newEditorManager(session)
 	slog.Info("session_creating", "sessionId", session.id, "profileId", profile.ID, "profile", profile.Name)
@@ -74,6 +75,7 @@ func (m *Manager) Create(ctx context.Context, profileID string, cols, rows int) 
 		slog.Error("session_create_failed", "sessionId", session.id, "profileId", profile.ID, "error", err)
 		return nil, err
 	}
+	session.startMonitor()
 	m.mu.Lock()
 	m.sessions[session.id] = session
 	m.mu.Unlock()
@@ -149,7 +151,9 @@ type Session struct {
 	editors         *editorManager
 	cwd             string
 
-	writeMu sync.Mutex
+	writeMu     sync.Mutex
+	monitorStop chan struct{}
+	monitorWG   sync.WaitGroup
 }
 
 func (s *Session) ID() string {
@@ -271,6 +275,7 @@ func (s *Session) Close() {
 	s.stdin = nil
 	s.ws = nil
 	s.mu.Unlock()
+	close(s.monitorStop)
 	if stdin != nil {
 		stdin.Close()
 	}
@@ -280,6 +285,7 @@ func (s *Session) Close() {
 	if conn != nil {
 		conn.Close(websocket.StatusNormalClosure, "session closed")
 	}
+	s.monitorWG.Wait()
 }
 
 func (s *Session) open(initialStatus Status) error {

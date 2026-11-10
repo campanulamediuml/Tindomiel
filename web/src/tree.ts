@@ -7,11 +7,18 @@ interface TreeNode {
   loading: boolean;
 }
 
+interface TreeSnapshot {
+  expanded: Set<string>;
+  nodes: Map<string, TreeNode>;
+  currentPath: string;
+}
+
 export class RemoteTree {
   private sessionId?: string;
   private currentPath = '/';
-  private readonly expanded = new Set<string>(['/']);
-  private readonly nodes = new Map<string, TreeNode>();
+  private expanded = new Set<string>(['/']);
+  private nodes = new Map<string, TreeNode>();
+  private readonly snapshots = new Map<string, TreeSnapshot>();
   private readonly container = element<HTMLDivElement>('remote-tree');
 
   constructor(private readonly api: Api, private readonly onSelect: (path: string) => void, private readonly onError: (message: string) => void) {
@@ -19,10 +26,19 @@ export class RemoteTree {
   }
 
   async setSession(sessionId?: string): Promise<void> {
+    if (this.sessionId) this.snapshots.set(this.sessionId, { expanded: this.expanded, nodes: this.nodes, currentPath: this.currentPath });
     this.sessionId = sessionId;
-    this.expanded.clear();
-    this.expanded.add('/');
-    this.nodes.clear();
+    const cached = sessionId ? this.snapshots.get(sessionId) : undefined;
+    if (cached) {
+      this.expanded = new Set(cached.expanded);
+      this.nodes = new Map(cached.nodes);
+      this.currentPath = cached.currentPath;
+      this.container.replaceChildren();
+      this.render();
+      return;
+    }
+    this.expanded = new Set(['/']);
+    this.nodes = new Map();
     this.currentPath = '/';
     this.container.replaceChildren();
     if (sessionId) await this.load('/');
@@ -30,6 +46,7 @@ export class RemoteTree {
   }
 
   setCurrent(path: string): void {
+    const sessionId = this.sessionId;
     this.currentPath = path;
     const parts = path.split('/');
     let current = '';
@@ -40,7 +57,7 @@ export class RemoteTree {
       const node = this.nodes.get(current);
       if (!node?.children && !node?.loading) {
         void this.load(current).then(() => {
-          if (this.currentPath === path) this.render();
+          if (this.sessionId === sessionId && this.currentPath === path) this.render();
         });
       }
     }
@@ -56,12 +73,14 @@ export class RemoteTree {
   }
 
   private async load(path: string): Promise<void> {
-    if (!this.sessionId) return;
-    const node = this.nodes.get(path) ?? { loading: false };
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
+    const nodes = this.nodes;
+    const node = nodes.get(path) ?? { loading: false };
     node.loading = true;
-    this.nodes.set(path, node);
+    nodes.set(path, node);
     try {
-      const entries = await this.api.listFiles(this.sessionId, path);
+      const entries = await this.api.listFiles(sessionId, path);
       node.children = entries.filter((entry) => entry.type === 'directory');
     } catch (error) {
       node.children = [];

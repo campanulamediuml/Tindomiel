@@ -2,7 +2,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import type { Api } from './api';
-import type { DisplayStatus, SessionInfo, SessionStatus, TransferState } from './types';
+import type { DisplayStatus, ResourceMetrics, SessionInfo, SessionStatus, TransferState } from './types';
 
 const encoder = new TextEncoder();
 
@@ -23,6 +23,7 @@ export class TerminalView {
     private readonly onStatus: (status: DisplayStatus) => void,
     private readonly onError: (message: string) => void,
     private readonly onTransfer: (transfer: TransferState) => void,
+    private readonly onMetrics: (metrics: ResourceMetrics) => void,
     private readonly onCwd: (path: string) => void,
   ) {
     this.element.className = 'terminal-view';
@@ -80,6 +81,10 @@ export class TerminalView {
     });
     this.resizeObserver = new ResizeObserver(() => this.scheduleFit());
     this.resizeObserver.observe(this.element);
+    this.element.addEventListener('scroll', (event) => {
+      if (event.target instanceof HTMLElement) event.target.scrollLeft = 0;
+      this.element.scrollLeft = 0;
+    }, true);
   }
 
   async connect(): Promise<void> {
@@ -95,7 +100,7 @@ export class TerminalView {
         this.terminal.write(new Uint8Array(event.data as ArrayBuffer));
         return;
       }
-      const control = JSON.parse(event.data) as { type: string; status?: SessionStatus; message?: string; transfer?: TransferState; path?: string };
+      const control = JSON.parse(event.data) as { type: string; status?: SessionStatus; message?: string; transfer?: TransferState; metrics?: ResourceMetrics; path?: string };
       if (control.type === 'status' && control.status) {
         this.setStatus(control.status);
       } else if (control.type === 'exit') {
@@ -104,6 +109,8 @@ export class TerminalView {
         this.onError(control.message ?? '终端错误');
       } else if (control.type === 'transfer' && control.transfer) {
         this.onTransfer(control.transfer);
+      } else if (control.type === 'metrics' && control.metrics) {
+        this.onMetrics(control.metrics);
       } else if (control.type === 'cwd' && control.path) {
         this.onCwd(control.path);
       }
@@ -118,6 +125,7 @@ export class TerminalView {
 
   activate(): void {
     this.element.hidden = false;
+    this.terminal.scrollToBottom();
     this.scheduleFit();
     this.terminal.focus();
   }
@@ -143,8 +151,11 @@ export class TerminalView {
     cancelAnimationFrame(this.resizeFrame);
     this.resizeObserver.disconnect();
     this.websocket?.close();
-    this.terminal.dispose();
-    this.element.remove();
+    try {
+      this.terminal.dispose();
+    } finally {
+      this.element.remove();
+    }
   }
 
   private sendInput(data: Uint8Array): void {

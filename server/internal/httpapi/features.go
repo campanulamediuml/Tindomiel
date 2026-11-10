@@ -56,6 +56,10 @@ func (s *Server) resourceMetrics(w http.ResponseWriter, r *http.Request) {
 	if found == nil {
 		return
 	}
+	if metrics, ok := found.CachedMetrics(); ok {
+		writeJSON(w, http.StatusOK, metrics)
+		return
+	}
 	metrics, err := found.Metrics(r.Context())
 	if err != nil {
 		slog.Warn("metrics_failed", "sessionId", found.ID(), "error", err)

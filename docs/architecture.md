@@ -43,13 +43,15 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - 逻辑会话状态：`connecting → ready → disconnected → reconnecting → ready`，显式关闭后进入 `closed`
   - 远程断线后的自动或手动重连沿用原 `sessionId`，但建立的是新的 SSH 连接和远程 shell
   - 每 30 秒发送一次 `keepalive@openssh.com` 检测远程连接失效；本地 WebSocket 不使用复杂心跳和重试机制
-  - 关闭标签时前端立即释放 UI 和 xterm，再异步调用后端删除；xterm 销毁异常被单独记录，不阻断标签关闭和后端清理
+  - 点击连接时前端先创建本地 pending 标签并显示连接中状态，后端创建成功后改用真实 `sessionId`；pending 标签不请求监控或 SFTP，提前关闭会在连接完成后清理后端会话，首次失败可右键重新发起
+  - 关闭标签时前端立即释放 UI 和 xterm，再异步调用后端删除；xterm 销毁异常被单独记录，DOM 在 `finally` 中强制移除，不阻断标签关闭和后端清理
 - **SSHConnection**
   - 默认使用 `~/.ssh/known_hosts` 校验主机密钥
   - 未知主机必须经用户在应用内弹窗确认指纹后方可保存并连接；指纹变化必须拒绝连接
   - 公钥认证优先（SSH Agent / privateKeys），密码认证作为后续回退
   - PTY 尺寸同步（window-change）
-  - Bash/Zsh 启动时注入 OSC 7 当前路径通知；注入期间暂时关闭 PTY ECHO，完成后用 `stty echo` 恢复，初始化脚本及续行提示不回显到终端
+  - Bash/Zsh 启动时注入 OSC 7 当前路径通知；Bash 的 `PROMPT_COMMAND` 使用换行拼接，兼容原值以分号或分号加空格结尾的配置
+  - 注入期间暂时关闭 PTY ECHO，完成后用 `stty echo` 恢复，初始化脚本及续行提示不回显到终端
 - **SftpService**
   - 同一标签页的 SFTP 与终端共用同一条 SSH 连接，使用独立 channel
   - 上传下载均采用流式 I/O 和背压处理，不将整个文件载入内存
@@ -57,15 +59,22 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - 文件夹通过 SFTP 递归下载，不另起 `scp` 进程；保留目录结构和普通文件权限，跳过符号链接，同名本地目录自动加序号
   - 文件夹任务聚合总字节数和进度，通过 `currentPath` 实时报告当前远程文件
   - 通过 RealPath 将当前目录规范化为绝对路径；目录树从 `/` 按需读取
+  - 前端按会话缓存目录树节点、展开状态、当前路径和文件列表，切换只恢复展示；手动刷新、进入目录、路径联动或上传完成后才重新读取，目录树节点 Map 按会话隔离
+  - 文件列表初始目录优先、名称升序，支持名称、mtime、创建时间点击排序及列宽拖拽；Linux 通过 GNU `stat %W` 批量获取出生时间，Windows 通过 PowerShell `CreationTimeUtc` 逐项容错获取；SFTP 的 `/C:/...` 规范路径在查询前转换为 PowerShell 使用的 `C:/...`，未知值返回 0 并显示 `—`
   - 缓存编辑将文件放入用户缓存目录下的会话私有目录（0700 / 0600），调用 macOS `open` 打开
   - 监听缓存目录而非单个文件 inode，兼容 VSCode 原子保存；事件去抖后自动上传原远程路径
   - 会话关闭时停止文件监听；远程断线时保留监听，保存失败通过 WS 通知前端
   - SSH 重连后重建 SFTP channel；中断的传输不伪装成已恢复或已续传
 - **ResourceMonitor**
   - 通过独立 SSH channel 采集 CPU、内存、交换、进程、网卡、磁盘、运行时间和负载
-  - Linux 读取 `/proc`、`df` 和 `ps`；Windows 使用 PowerShell/CIM
+  - 通过 `uname -s` 区分 Linux、macOS（Darwin）和 Windows；Linux 读取 `/proc`、`df` 和 `ps`，macOS 使用 `top`、`vm_stat`、`vm.swapusage`、`netstat`、`df` 和 `ps`，Windows 使用 PowerShell/CIM，交换空间读取 `Win32_PageFileUsage` 的实际分页文件总量和已用量
+  - Windows 命令优先通过 UTF-16LE Base64 的 `powershell -NoProfile -NonInteractive -EncodedCommand` 执行；服务端拒绝 exec 时，使用独立的交互 Shell channel 回退，PTY 类型为 `dumb`，先尝试 PowerShell 原生命令，再兼容 `cmd.exe` 中的 EncodedCommand
+  - Windows 回退结果使用 Base64 短行分块，每块带序号和总数，后端校验缺块、重块、顺序和 UTF-8 后解码，避免 ConPTY 改写长行；解码后的监控数据采用 `SYS|...`、`PROC|...`、`NET|...`、`DISK|...` 等键值文本协议，不依赖终端中的 JSON 或提示符位置
   - CPU 和网络速率使用采样差值；本机 ping 目标 IP 获取延迟
-  - 仅当前标签每 1 秒请求一次，不在后端为所有标签持续轮询
+  - 每个逻辑会话由 Manager 启动一个后台监控 goroutine，持续采集并更新该 Session 的互斥快照缓存，关闭会话时停止并等待 goroutine 退出
+  - 正常采集间隔为 1 秒，失败退避为 3 秒；Windows 实际间隔还包含 PowerShell/CIM 采集耗时
+  - 快照通过 WS `metrics` 控制帧推送；REST 只读取最近缓存，初次缓存尚未建立时才同步采集
+  - 前端按 `sessionId` 保存最近快照、各网卡最近 40 个样本、ping 历史和网卡选择，后台标签也持续追加；隐藏标签只更新内存、不渲染 DOM，切换标签直接展示已有曲线，不触发远端采集
 - **Logging**
   - 后端输出 JSON Lines 到标准错误和日志文件，单个文件达到 4 MiB 后轮转，启动时及运行期间每小时清理超过 3 天的备份
   - 前端将界面事件写入 localStorage，最多保留 300 条且只保留最近 3 天

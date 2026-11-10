@@ -7,22 +7,28 @@ interface NetworkHistory {
   tx: number[];
 }
 
+interface SessionHistory {
+  network: Map<string, NetworkHistory>;
+  ping: number[];
+  selectedInterface: string;
+}
+
 export class MetricsPanel {
   private sessionId?: string;
   private status?: DisplayStatus;
-  private timer = 0;
+  private readonly snapshots = new Map<string, ResourceMetrics>();
   private sortKey: 'cpu' | 'memory' = 'cpu';
   private sortDirection = -1;
   private selectedInterface = '';
   private interfaceSignature = '';
-  private readonly history = new Map<string, NetworkHistory>();
-  private readonly pingHistory: number[] = [];
+  private readonly histories = new Map<string, SessionHistory>();
   private readonly onError: (message: string) => void;
   private host = '';
   private latest?: ResourceMetrics;
   private activeInterface = '';
   private networkAnimationFrame = 0;
   private displayedNetwork: NetworkHistory = { rx: [], tx: [] };
+  private sessionVersion = 0;
 
   constructor(private readonly api: Api, onError: (message: string) => void) {
     this.onError = onError;
@@ -48,10 +54,10 @@ export class MetricsPanel {
 
   setSession(sessionId: string | undefined, host = '', status?: DisplayStatus): void {
     if (this.sessionId !== sessionId) {
+      if (this.sessionId) this.historyFor(this.sessionId).selectedInterface = this.selectedInterface || 'auto';
       this.sessionId = sessionId;
-      this.history.clear();
-      this.pingHistory.length = 0;
-      this.selectedInterface = 'auto';
+      this.sessionVersion += 1;
+      this.selectedInterface = sessionId ? this.historyFor(sessionId).selectedInterface : 'auto';
       this.interfaceSignature = '';
       this.clearView();
     }
@@ -63,24 +69,60 @@ export class MetricsPanel {
 
   setStatus(status?: DisplayStatus): void {
     this.status = status;
-    window.clearTimeout(this.timer);
-    if (status === 'ready' && this.sessionId) this.schedule();
+    if (status !== 'ready' || !this.sessionId) return;
+    const cached = this.snapshots.get(this.sessionId);
+    if (cached) this.render(cached);
+    else void this.loadCached();
   }
 
-  private schedule(delay = 0): void {
-    window.clearTimeout(this.timer);
-    this.timer = window.setTimeout(() => void this.poll(), delay);
+  receive(sessionId: string, metrics: ResourceMetrics): void {
+    this.snapshots.set(sessionId, metrics);
+    this.recordHistory(sessionId, metrics);
+    if (this.sessionId === sessionId && this.status === 'ready') this.render(metrics);
   }
 
-  private async poll(): Promise<void> {
-    if (!this.sessionId || this.status !== 'ready') return;
-    try {
-      const metrics = await this.api.metrics(this.sessionId);
-      if (this.status === 'ready') this.render(metrics);
-    } catch {
-      if (this.status === 'ready') element<HTMLDivElement>('system-load').textContent = '监控暂不可用';
+  removeSession(sessionId: string): void {
+    this.snapshots.delete(sessionId);
+    this.histories.delete(sessionId);
+  }
+
+  private historyFor(sessionId: string): SessionHistory {
+    let history = this.histories.get(sessionId);
+    if (!history) {
+      history = { network: new Map(), ping: [], selectedInterface: 'auto' };
+      this.histories.set(sessionId, history);
     }
-    if (this.status === 'ready') this.schedule(1000);
+    return history;
+  }
+
+  private recordHistory(sessionId: string, metrics: ResourceMetrics): void {
+    const history = this.historyFor(sessionId);
+    for (const iface of metrics.interfaces) {
+      const network = history.network.get(iface.name) ?? { rx: [], tx: [] };
+      network.rx.push(iface.rxBytesPerSecond);
+      network.tx.push(iface.txBytesPerSecond);
+      if (network.rx.length > 40) network.rx.shift();
+      if (network.tx.length > 40) network.tx.shift();
+      history.network.set(iface.name, network);
+    }
+    history.ping.push(metrics.pingMs);
+    if (history.ping.length > 40) history.ping.shift();
+  }
+
+  private async loadCached(): Promise<void> {
+    const sessionId = this.sessionId;
+    const version = this.sessionVersion;
+    if (!sessionId) return;
+    try {
+      const metrics = await this.api.metrics(sessionId);
+      this.snapshots.set(sessionId, metrics);
+      this.recordHistory(sessionId, metrics);
+      if (this.sessionId === sessionId && this.sessionVersion === version && this.status === 'ready') this.render(metrics);
+    } catch {
+      if (this.sessionId === sessionId && this.sessionVersion === version && this.status === 'ready') {
+        element<HTMLDivElement>('system-load').textContent = '监控暂不可用';
+      }
+    }
   }
 
   private render(metrics: ResourceMetrics): void {
@@ -95,8 +137,6 @@ export class MetricsPanel {
     setMeter('swap-bar', metrics.swap.usedPercent);
     this.renderProcesses(metrics);
     this.renderNetwork(metrics);
-    this.pingHistory.push(metrics.pingMs);
-    if (this.pingHistory.length > 40) this.pingHistory.shift();
     element<HTMLSpanElement>('ping-text').textContent = metrics.pingMs > 0 ? `${metrics.pingMs.toFixed(1)} ms` : '— ms';
     this.drawPing();
     this.renderDisks(metrics);
@@ -258,16 +298,10 @@ export class MetricsPanel {
       ? metrics.interfaces.reduce((best, item) => item.rxBytesPerSecond + item.txBytesPerSecond > (best?.rxBytesPerSecond ?? 0) + (best?.txBytesPerSecond ?? 0) ? item : best, metrics.interfaces[0])
       : metrics.interfaces.find((item) => item.name === this.selectedInterface) ?? metrics.interfaces[0];
     this.activeInterface = active?.name ?? '';
-    for (const iface of metrics.interfaces) {
-      const history = this.history.get(iface.name) ?? { rx: [], tx: [] };
-      history.rx.push(iface.rxBytesPerSecond);
-      history.tx.push(iface.txBytesPerSecond);
-      if (history.rx.length > 40) history.rx.shift();
-      if (history.tx.length > 40) history.tx.shift();
-      this.history.set(iface.name, history);
-      if (iface.name === this.activeInterface) {
-        element<HTMLSpanElement>('network-rates').textContent = `↑ ${formatRate(iface.txBytesPerSecond)}  ↓ ${formatRate(iface.rxBytesPerSecond)}${this.selectedInterface === 'auto' ? ` · ${iface.name}` : ''}`;
-      }
+    if (active) {
+      const rates = element<HTMLSpanElement>('network-rates');
+      rates.textContent = `↑ ${compactRate(active.txBytesPerSecond)} ↓ ${compactRate(active.rxBytesPerSecond)}`;
+      rates.title = `↑ ${formatRate(active.txBytesPerSecond)} ↓ ${formatRate(active.rxBytesPerSecond)} · ${active.name}`;
     }
     this.drawNetwork();
   }
@@ -296,7 +330,7 @@ export class MetricsPanel {
   }
 
   private drawNetwork(): void {
-    const target = this.history.get(this.activeInterface) ?? { rx: [], tx: [] };
+    const target = this.sessionId ? this.historyFor(this.sessionId).network.get(this.activeInterface) ?? { rx: [], tx: [] } : { rx: [], tx: [] };
     const from = this.displayedNetwork;
     cancelAnimationFrame(this.networkAnimationFrame);
     if (from.rx.length === 0 && from.tx.length === 0) {
@@ -323,7 +357,8 @@ export class MetricsPanel {
   }
 
   private drawPing(): void {
-    drawChart('ping-chart', [{ values: this.pingHistory, color: '#79c0ff' }]);
+    const values = this.sessionId ? this.historyFor(this.sessionId).ping : [];
+    drawChart('ping-chart', [{ values, color: '#79c0ff' }]);
   }
 
   private changeSort(key: 'cpu' | 'memory'): void {
@@ -332,14 +367,31 @@ export class MetricsPanel {
       this.sortKey = key;
       this.sortDirection = 1;
     }
-    this.schedule();
+    if (this.latest) {
+      this.renderProcesses(this.latest);
+      if (element<HTMLDialogElement>('metrics-dialog').open) this.renderDialog();
+    }
   }
 
   private clearView(): void {
+    this.latest = undefined;
+    this.activeInterface = '';
+    this.displayedNetwork = { rx: [], tx: [] };
+    cancelAnimationFrame(this.networkAnimationFrame);
     element<HTMLDivElement>('system-uptime').textContent = '运行 —';
     element<HTMLDivElement>('system-load').textContent = '负载 —';
+    element<HTMLSpanElement>('cpu-text').textContent = '—';
+    element<HTMLSpanElement>('memory-text').textContent = '—';
+    element<HTMLSpanElement>('swap-text').textContent = '—';
+    setMeter('cpu-bar', 0);
+    setMeter('memory-bar', 0);
+    setMeter('swap-bar', 0);
+    element<HTMLSpanElement>('network-rates').textContent = '↑ — ↓ —';
+    element<HTMLSpanElement>('ping-text').textContent = '— ms';
+    element<HTMLSelectElement>('network-interface').replaceChildren();
     element<HTMLDivElement>('process-list').replaceChildren();
     element<HTMLDivElement>('disk-list').replaceChildren();
+    if (element<HTMLDialogElement>('metrics-dialog').open) this.renderDialog();
     this.drawNetwork();
     this.drawPing();
   }
@@ -347,6 +399,10 @@ export class MetricsPanel {
 
 function setMeter(id: string, value: number): void {
   element<HTMLDivElement>(id).style.width = `${Math.min(100, Math.max(0, value))}%`;
+}
+
+function compactRate(value: number): string {
+  return formatRate(value).replace(' KB/s', 'K').replace(' MB/s', 'M').replace(' GB/s', 'G').replace(' B/s', 'B');
 }
 
 function arrow(direction: number): string {

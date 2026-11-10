@@ -4,6 +4,7 @@ import { Api } from './api';
 import { ConnectionManager } from './connection';
 import { CustomSelect } from './custom-select';
 import { LogCenter, recordFrontendLog } from './logs';
+import { setupResizing } from './resize';
 import { MetricsPanel } from './metrics';
 import { SftpPanel } from './sftp';
 import { TerminalView } from './terminal';
@@ -15,11 +16,15 @@ interface Tab {
   profile: Profile;
   terminal: TerminalView;
   status: DisplayStatus;
+  pending: boolean;
+  cancelled: boolean;
   button?: HTMLElement;
 }
 
 const tabs = new Map<string, Tab>();
 let activeId: string | undefined;
+let tabContextId = '';
+let draggedTabId = '';
 let connections: ConnectionManager;
 let metrics: MetricsPanel;
 let sftp: SftpPanel;
@@ -59,6 +64,28 @@ function updateDownloadPath(path: string): void {
 }
 
 function bindEvents(): void {
+  document.addEventListener('contextmenu', (event) => event.preventDefault());
+  document.addEventListener('scroll', () => {
+    document.documentElement.scrollLeft = 0;
+    document.body.scrollLeft = 0;
+  }, true);
+  enableTabDragScroll();
+  setupResizing();
+  const tabMenu = element<HTMLDivElement>('tab-context-menu');
+  document.addEventListener('click', () => { tabMenu.hidden = true; });
+  element<HTMLButtonElement>('tab-reconnect').addEventListener('click', () => {
+    const tab = tabs.get(tabContextId);
+    tabMenu.hidden = true;
+    if (!tab) return;
+    if (tab.pending) {
+      if (tab.status !== 'error') return;
+      const profile = tab.profile;
+      closeTab(tabContextId);
+      void connect(profile);
+      return;
+    }
+    void tab.terminal.reconnect().catch((error) => showToast(messageOf(error)));
+  });
   for (const id of ['new-tab', 'welcome-connect']) {
     element<HTMLButtonElement>(id).addEventListener('click', () => void connections.open());
   }
@@ -96,27 +123,109 @@ function bindEvents(): void {
   });
 }
 
+function enableTabDragScroll(): void {
+  let startX = 0;
+  let startScroll = 0;
+  let dragging = false;
+  let moved = false;
+  let suppressClick = false;
+  tabsElement.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || ((event.target as HTMLElement).closest('.tab') && !event.shiftKey)) return;
+    dragging = true;
+    moved = false;
+    startX = event.clientX;
+    startScroll = tabsElement.scrollLeft;
+    tabsElement.setPointerCapture(event.pointerId);
+    tabsElement.classList.add('dragging');
+  });
+  tabsElement.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    const delta = event.clientX - startX;
+    if (Math.abs(delta) > 4) moved = true;
+    tabsElement.scrollLeft = startScroll - delta;
+  });
+  const finish = (event: PointerEvent) => {
+    if (!dragging) return;
+    dragging = false;
+    if (moved) suppressClick = true;
+    if (tabsElement.hasPointerCapture(event.pointerId)) tabsElement.releasePointerCapture(event.pointerId);
+    tabsElement.classList.remove('dragging');
+  };
+  tabsElement.addEventListener('pointerup', finish);
+  tabsElement.addEventListener('pointercancel', finish);
+  tabsElement.addEventListener('click', (event) => {
+    if (!suppressClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClick = false;
+  }, true);
+}
+
+function reorderTabs(draggedId: string, targetId: string, insertAfter: boolean): void {
+  if (draggedId === targetId || !tabs.has(draggedId)) return;
+  const dragged = tabs.get(draggedId)!;
+  const entries = Array.from(tabs.entries()).filter(([id]) => id !== draggedId);
+  const targetIndex = entries.findIndex(([id]) => id === targetId);
+  if (targetIndex < 0) return;
+  entries.splice(targetIndex + (insertAfter ? 1 : 0), 0, [draggedId, dragged]);
+  tabs.clear();
+  for (const [id, tab] of entries) tabs.set(id, tab);
+  renderTabs();
+}
+
 async function connect(profile: Profile): Promise<void> {
-  showToast(`正在连接 ${profile.name}…`);
+  const api = apiClient;
+  const session: SessionInfo = {
+    sessionId: `pending-${crypto.randomUUID()}`,
+    profileId: profile.id,
+    status: 'connecting',
+    openedAt: Math.floor(Date.now() / 1000),
+  };
+  const terminal = new TerminalView(
+    session,
+    api,
+    (status) => updateStatus(session.sessionId, status),
+    showToast,
+    (transfer) => transfers.update(transfer),
+    (snapshot) => metrics.receive(session.sessionId, snapshot),
+    (path) => {
+      if (activeId === session.sessionId) void sftp.load(path).catch((error) => showToast(messageOf(error)));
+    },
+  );
+  const tab: Tab = { profile, terminal, status: 'connecting', pending: true, cancelled: false };
+  tabs.set(session.sessionId, tab);
+  terminalArea.append(terminal.element);
+  terminal.terminal.write(`正在连接 ${profile.name}…\r\n`);
+  renderTabs();
+  activate(session.sessionId);
+  const pendingId = session.sessionId;
   try {
-    const api = apiClient;
-    const session = await createSession(api, profile.id);
-    const terminal = new TerminalView(
-      session,
-      api,
-      (status) => updateStatus(session.sessionId, status),
-      showToast,
-      (transfer) => transfers.update(transfer),
-      (path) => {
-        if (activeId === session.sessionId) void sftp.load(path).catch((error) => showToast(messageOf(error)));
-      },
-    );
-    tabs.set(session.sessionId, { profile, terminal, status: 'connecting' });
-    terminalArea.append(terminal.element);
-    renderTabs();
-    activate(session.sessionId);
+    const created = await createSession(api, profile.id);
+    if (tab.cancelled || !tabs.has(pendingId)) {
+      void api.deleteSession(created.sessionId).catch(() => undefined);
+      return;
+    }
+    tabs.delete(pendingId);
+    Object.assign(session, created);
+    tab.pending = false;
+    tabs.set(session.sessionId, tab);
+    if (activeId === pendingId) {
+      activeId = session.sessionId;
+      renderTabs();
+      activate(session.sessionId);
+    } else {
+      renderTabs();
+    }
     await terminal.connect();
   } catch (error) {
+    if (tab.cancelled || !tabs.has(pendingId)) return;
+    tab.status = 'error';
+    terminal.terminal.write(`连接失败：${messageOf(error)}\r\n`);
+    if (tab.button) {
+      tab.button.dataset.status = 'error';
+      tab.button.title = `${profile.name} · 错误`;
+    }
+    if (activeId === pendingId) updateToolbar('error');
     showToast(messageOf(error));
   }
 }
@@ -173,8 +282,13 @@ function activate(sessionId: string): void {
   next.terminal.activate();
   welcome.hidden = true;
   updateToolbar(next.status);
-  metrics.setSession(sessionId, next.profile.options.host, next.status);
-  void sftp.setSession(sessionId).catch((error) => showToast(messageOf(error)));
+  if (next.pending) {
+    metrics.setSession(undefined);
+    void sftp.setSession(undefined).catch((error) => showToast(messageOf(error)));
+  } else {
+    metrics.setSession(sessionId, next.profile.options.host, next.status);
+    void sftp.setSession(sessionId).catch((error) => showToast(messageOf(error)));
+  }
 }
 
 function updateStatus(sessionId: string, status: DisplayStatus): void {
@@ -202,13 +316,15 @@ function closeTab(sessionId: string): void {
   const tab = tabs.get(sessionId);
   if (!tab) return;
   recordFrontendLog(`关闭标签 ${tab.profile.name} (${sessionId})`);
+  tab.cancelled = true;
   tabs.delete(sessionId);
+  metrics.removeSession(sessionId);
   try {
     tab.terminal.dispose();
   } catch (error) {
     recordFrontendLog(`销毁终端失败：${messageOf(error)}`, 'error');
   }
-  void apiClient.deleteSession(sessionId).catch((error) => showToast(messageOf(error)));
+  if (!tab.pending) void apiClient.deleteSession(sessionId).catch((error) => showToast(messageOf(error)));
   if (activeId === sessionId) {
     activeId = undefined;
     const next = Array.from(tabs.keys()).at(-1);
@@ -247,7 +363,36 @@ function renderTabs(): void {
       void closeTab(sessionId);
     });
     button.append(state, name, close);
+    button.draggable = true;
     button.addEventListener('click', () => activate(sessionId));
+    button.addEventListener('dragstart', (event) => {
+      draggedTabId = sessionId;
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', sessionId);
+      }
+    });
+    button.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    });
+    button.addEventListener('drop', (event) => {
+      event.preventDefault();
+      const bounds = button.getBoundingClientRect();
+      reorderTabs(draggedTabId, sessionId, event.clientX > bounds.left + bounds.width / 2);
+      draggedTabId = '';
+    });
+    button.addEventListener('dragend', () => { draggedTabId = ''; });
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      tabContextId = sessionId;
+      const menu = element<HTMLDivElement>('tab-context-menu');
+      const reconnect = element<HTMLButtonElement>('tab-reconnect');
+      reconnect.disabled = tab.pending ? tab.status !== 'error' : tab.status !== 'disconnected' && tab.status !== 'detached';
+      menu.style.left = `${Math.min(event.clientX, window.innerWidth - 190)}px`;
+      menu.style.top = `${Math.min(event.clientY, window.innerHeight - 60)}px`;
+      menu.hidden = false;
+    });
     button.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') activate(sessionId);
     });

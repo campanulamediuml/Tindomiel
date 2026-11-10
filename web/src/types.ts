@@ -53,6 +53,7 @@ export interface FileEntry {
   type: 'file' | 'directory' | 'symlink';
   size: number;
   mtime: number;
+  created: number;
   permissions: string;
 }
 

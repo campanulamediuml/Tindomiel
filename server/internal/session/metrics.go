@@ -2,8 +2,8 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -79,6 +79,7 @@ type metricsState struct {
 	cpuIdle   uint64
 	network   map[string]networkSample
 	sampledAt time.Time
+	latest    *ResourceMetrics
 }
 
 func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
@@ -88,9 +89,13 @@ func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
 		ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		output, err := s.exec(ctx, "uname -s")
 		cancel()
-		if err == nil && strings.Contains(strings.ToLower(string(output)), "linux") {
+		system := strings.ToLower(string(output))
+		switch {
+		case err == nil && strings.Contains(system, "linux"):
 			s.metrics.os = "linux"
-		} else {
+		case err == nil && strings.Contains(system, "darwin"):
+			s.metrics.os = "darwin"
+		default:
 			s.metrics.os = "windows"
 		}
 	}
@@ -98,16 +103,29 @@ func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
 		result ResourceMetrics
 		err    error
 	)
-	if s.metrics.os == "linux" {
+	switch s.metrics.os {
+	case "linux":
 		result, err = s.linuxMetrics(ctx)
-	} else {
+	case "darwin":
+		result, err = s.darwinMetrics(ctx)
+	default:
 		result, err = s.windowsMetrics(ctx)
 	}
 	if err != nil {
 		return ResourceMetrics{}, err
 	}
 	result.PingMs = s.ping(ctx)
+	s.metrics.latest = &result
 	return result, nil
+}
+
+func (s *Session) CachedMetrics() (ResourceMetrics, bool) {
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+	if s.metrics.latest == nil {
+		return ResourceMetrics{}, false
+	}
+	return *s.metrics.latest, true
 }
 
 func (s *Session) linuxMetrics(ctx context.Context) (ResourceMetrics, error) {
@@ -171,62 +189,88 @@ func (s *Session) windowsMetrics(ctx context.Context) (ResourceMetrics, error) {
 		`$cpu=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;` +
 		`$cpuInfo=Get-CimInstance Win32_Processor|Select-Object -First 1 Name,NumberOfLogicalProcessors;` +
 		`$computer=Get-CimInstance Win32_ComputerSystem;` +
-		`$system=[pscustomobject]@{hostname=$env:COMPUTERNAME;osName=$os.Caption;kernelVersion=$os.Version;architecture=$env:PROCESSOR_ARCHITECTURE;cpuModel=$cpuInfo.Name;cpuCores=$computer.NumberOfLogicalProcessors};` +
 		`$p=Get-CimInstance Win32_PerfFormattedData_PerfProc_Process|Where-Object {$_.Name -ne '_Total' -and $_.Name -ne 'Idle'}|Select-Object IDProcess,PercentProcessorTime,WorkingSetPrivate,Name;` +
 		`$n=Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface|Select-Object Name,BytesReceivedPersec,BytesSentPersec;` +
 		`$d=Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3'|Select-Object DeviceID,Size,FreeSpace;` +
-		`$swapTotal=($os.TotalVirtualMemorySize-$os.TotalVisibleMemorySize)*1024;` +
-		`$swapUsed=$swapTotal-($os.FreeVirtualMemory-$os.FreePhysicalMemory)*1024;` +
-		`[pscustomobject]@{system=$system;cpu=$cpu;uptime=((Get-Date)-$os.LastBootUpTime).TotalSeconds;memoryTotal=$os.TotalVisibleMemorySize*1024;memoryAvailable=$os.FreePhysicalMemory*1024;swapTotal=$swapTotal;swapUsed=$swapUsed;processes=$p;interfaces=$n;disks=$d}|ConvertTo-Json -Compress -Depth 4`
+		`$pageFiles=Get-CimInstance Win32_PageFileUsage;` +
+		`$swapTotal=($pageFiles|Measure-Object AllocatedBaseSize -Sum).Sum*1MB;` +
+		`$swapUsed=($pageFiles|Measure-Object CurrentUsage -Sum).Sum*1MB;` +
+		`$uptime=((Get-Date)-$os.LastBootUpTime).TotalSeconds;` +
+		`$memoryTotal=$os.TotalVisibleMemorySize*1024;` +
+		`$memoryAvailable=$os.FreePhysicalMemory*1024;` +
+		`"SYS|$env:COMPUTERNAME|$($os.Caption)|$($os.Version)|$env:PROCESSOR_ARCHITECTURE|$($cpuInfo.Name)|$($computer.NumberOfLogicalProcessors)";` +
+		`"CPU|$cpu";"UPTIME|$uptime";"MEM|$memoryTotal|$memoryAvailable";"SWAP|$swapTotal|$swapUsed";` +
+		`$p | ForEach-Object { "PROC|$($_.IDProcess)|$($_.PercentProcessorTime)|$($_.WorkingSetPrivate)|$($_.Name)" };` +
+		`$n | ForEach-Object { "NET|$($_.Name)|$($_.BytesReceivedPersec)|$($_.BytesSentPersec)" };` +
+		`$d | ForEach-Object { "DISK|$($_.DeviceID)|$($_.Size)|$($_.FreeSpace)" }`
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	output, err := s.exec(ctx, `powershell -NoProfile -NonInteractive -Command "`+script+`"`)
+	output, err := s.exec(ctx, powershellCommand(script))
 	if err != nil {
 		return ResourceMetrics{}, fmt.Errorf("read Windows metrics: %w", err)
 	}
-	var raw struct {
-		System          SystemMetrics `json:"system"`
-		CPU             float64       `json:"cpu"`
-		Uptime          float64       `json:"uptime"`
-		MemoryTotal     uint64        `json:"memoryTotal"`
-		MemoryAvailable uint64        `json:"memoryAvailable"`
-		SwapTotal       uint64        `json:"swapTotal"`
-		SwapUsed        uint64        `json:"swapUsed"`
-		Processes       []struct {
-			PID    int     `json:"IDProcess"`
-			CPU    float64 `json:"PercentProcessorTime"`
-			Memory uint64  `json:"WorkingSetPrivate"`
-			Name   string  `json:"Name"`
-		} `json:"processes"`
-		Interfaces []struct {
-			Name string  `json:"Name"`
-			Rx   float64 `json:"BytesReceivedPersec"`
-			Tx   float64 `json:"BytesSentPersec"`
-		} `json:"interfaces"`
-		Disks []struct {
-			Path string `json:"DeviceID"`
-			Size uint64 `json:"Size"`
-			Free uint64 `json:"FreeSpace"`
-		} `json:"disks"`
+	return parseWindowsTextMetrics(output), nil
+}
+
+func parseWindowsTextMetrics(output []byte) ResourceMetrics {
+	result := ResourceMetrics{LoadAverage: []float64{}, Processes: []ProcessMetrics{}, Interfaces: []InterfaceMetrics{}, Disks: []DiskMetrics{}}
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "> "))
+		parts := strings.Split(line, "|")
+		if len(parts) < 2 {
+			continue
+		}
+		switch parts[0] {
+		case "SYS":
+			if len(parts) >= 7 {
+				cores, _ := strconv.Atoi(parts[6])
+				result.System = SystemMetrics{Hostname: parts[1], OSName: parts[2], KernelVersion: parts[3], Architecture: parts[4], CPUModel: parts[5], CPUCores: cores}
+			}
+		case "CPU":
+			result.CPUPercent, _ = strconv.ParseFloat(parts[1], 64)
+		case "UPTIME":
+			result.UptimeSeconds, _ = strconv.ParseFloat(parts[1], 64)
+		case "MEM":
+			if len(parts) >= 3 {
+				total := parseUintText(parts[1])
+				available := parseUintText(parts[2])
+				used := subtract(total, available)
+				result.Memory = MemoryMetrics{Total: total, Used: used, Available: available, UsedPercent: percentage(used, total)}
+			}
+		case "SWAP":
+			if len(parts) >= 3 {
+				total := parseUintText(parts[1])
+				used := parseUintText(parts[2])
+				result.Swap = SwapMetrics{Total: total, Used: used, UsedPercent: percentage(used, total)}
+			}
+		case "PROC":
+			if len(parts) >= 5 {
+				pid, _ := strconv.Atoi(parts[1])
+				cpu, _ := strconv.ParseFloat(parts[2], 64)
+				memory := parseUintText(parts[3])
+				result.Processes = append(result.Processes, ProcessMetrics{PID: pid, CPUPercent: cpu, MemoryBytes: memory, Command: strings.Join(parts[4:], "|")})
+			}
+		case "NET":
+			if len(parts) >= 4 {
+				rx, _ := strconv.ParseFloat(parts[2], 64)
+				tx, _ := strconv.ParseFloat(parts[3], 64)
+				result.Interfaces = append(result.Interfaces, InterfaceMetrics{Name: parts[1], RxBytesPerSecond: rx, TxBytesPerSecond: tx})
+			}
+		case "DISK":
+			if len(parts) >= 4 {
+				total := parseUintText(parts[2])
+				free := parseUintText(parts[3])
+				used := subtract(total, free)
+				result.Disks = append(result.Disks, DiskMetrics{Path: parts[1], Total: total, Used: used, Available: free, UsedPercent: percentage(used, total)})
+			}
+		}
 	}
-	if err := json.Unmarshal(output, &raw); err != nil {
-		return ResourceMetrics{}, fmt.Errorf("parse Windows metrics: %w", err)
-	}
-	result := ResourceMetrics{System: raw.System, UptimeSeconds: raw.Uptime, LoadAverage: []float64{}, CPUPercent: raw.CPU}
-	used := subtract(raw.MemoryTotal, raw.MemoryAvailable)
-	result.Memory = MemoryMetrics{Total: raw.MemoryTotal, Used: used, Available: raw.MemoryAvailable, UsedPercent: percentage(used, raw.MemoryTotal)}
-	result.Swap = SwapMetrics{Total: raw.SwapTotal, Used: raw.SwapUsed, UsedPercent: percentage(raw.SwapUsed, raw.SwapTotal)}
-	for _, process := range raw.Processes {
-		result.Processes = append(result.Processes, ProcessMetrics{PID: process.PID, CPUPercent: process.CPU, MemoryBytes: process.Memory, Command: process.Name})
-	}
-	for _, iface := range raw.Interfaces {
-		result.Interfaces = append(result.Interfaces, InterfaceMetrics{Name: iface.Name, RxBytesPerSecond: iface.Rx, TxBytesPerSecond: iface.Tx})
-	}
-	for _, disk := range raw.Disks {
-		used := subtract(disk.Size, disk.Free)
-		result.Disks = append(result.Disks, DiskMetrics{Path: disk.Path, Total: disk.Size, Used: used, Available: disk.Free, UsedPercent: percentage(used, disk.Size)})
-	}
-	return result, nil
+	return result
+}
+
+func parseUintText(value string) uint64 {
+	parsed, _ := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+	return parsed
 }
 
 func (s *Session) exec(ctx context.Context, command string) ([]byte, error) {
@@ -246,7 +290,24 @@ func (s *Session) exec(ctx context.Context, command string) ([]byte, error) {
 	done := make(chan response, 1)
 	go func() {
 		output, err := remote.CombinedOutput(command)
-		done <- response{output: output, err: err}
+		if err == nil {
+			done <- response{output: output}
+			return
+		}
+		if script, ok := powerShellScript(command); ok {
+			raw, rawErr := runPowerShellEncodedResult(ctx, client, script)
+			if rawErr == nil {
+				done <- response{output: raw}
+				return
+			}
+			slog.Debug("powershell_encoded_result_failed", "error", rawErr)
+		}
+		fallback, fallbackErr := runShellCommand(ctx, client, command)
+		if fallbackErr != nil {
+			done <- response{output: fallback, err: fmt.Errorf("exec: %v; shell fallback: %w", err, fallbackErr)}
+			return
+		}
+		done <- response{output: fallback}
 	}()
 	select {
 	case <-ctx.Done():

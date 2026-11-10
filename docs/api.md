@@ -130,7 +130,7 @@ POST /api/host-keys/accept
 
 ```
 GET  /api/sftp/:sessionId/list?path=/home/ubuntu
-→ [{ "name": "config.json", "type": "file", "size": 4221, "mtime": 1731200000 }]
+→ [{ "name": "config.json", "type": "file", "size": 4221, "mtime": 1731200000, "created": 1731100000 }]
 
 POST /api/sftp/:sessionId/download-ticket
 → { "ticket": "short-lived-one-time-value", "expiresAt": 1731200060 }
@@ -150,6 +150,8 @@ POST /api/sftp/:sessionId/download-directory
   body: { "path": "/home/ubuntu/project" }
 → { "path": "/Users/me/Downloads/project", "files": 42, "bytes": 5330944 }
 ```
+
+`created` 为 Unix 秒时间戳，表示远程文件出生时间。Linux 使用 GNU `stat --printf='%W\0'` 每 50 个路径批量查询；Windows 使用 PowerShell `CreationTimeUtc` 逐项容错查询，并将 SFTP 的 `/C:/...` 路径规范化为 `C:/...` 后执行。无法获取时为 0，前端显示 `—`，不会用 `mtime` 代替。
 
 上传下载不得先将整个文件读入内存。界面中的普通文件和文件夹下载均通过 POST 接口直接写入用户选择的下载目录，完成后返回实际本地路径；同名文件在扩展名前加 `-1`、`-2`，同名目录在名称后加序号，不覆盖已有内容。每个文件先写临时文件再原子改名。GET 下载 ticket 接口保留用于直接流式下载。
 
@@ -193,7 +195,11 @@ GET /api/metrics/:sessionId
   }
 ```
 
-监控仅按需采集。前端仅对当前已连接标签每 1 秒请求一次；进程默认按资源占用降序，点击 CPU 或内存表头可切换升序/降序。网络默认自动选择活动网卡，也可按接口名手动切换；网络图以中间横线为零轴，红色上行柱向上、绿色下行柱向下，图表高度、柱宽和间距固定。
+每个会话由后端后台 goroutine 持续采集并维护最近快照。GET 优先返回缓存，初次缓存尚未建立时才同步采集；前端不通过定时 REST 请求维持监控，而是接收 WS 推送。进程默认按资源占用降序，点击 CPU 或内存表头可切换升序/降序。网络默认自动选择活动网卡，也可按接口名手动切换；网络图以中间横线为零轴，红色上行柱向上、绿色下行柱向下，图表高度、柱宽和间距固定。
+
+后端通过 `uname -s` 区分 Linux、macOS（Darwin）和 Windows。macOS 监控使用系统自带 `top`、`vm_stat`、`vm.swapusage`、`netstat`、`df` 和 `ps`，无需安装远端依赖。
+
+Windows 同时兼容 `cmd.exe` 和 PowerShell 默认 Shell。采集命令使用 UTF-16LE Base64 的 `EncodedCommand`；远端拒绝 exec 时改用独立交互 Shell（`TERM=dumb`），PowerShell 原生执行失败后由 `cmd.exe` 回退。结果按带序号的 Base64 短行返回并校验完整性，解码为 `SYS|...`、`PROC|...`、`NET|...`、`DISK|...` 键值文本，避免 ConPTY 长行控制序列污染。Windows 创建时间查询中的 `/C:/...` 会转换为 `C:/...`；交换空间来自 `Win32_PageFileUsage`。
 
 ## WebSocket：终端
 
@@ -228,6 +234,7 @@ WS /ws/terminal?sessionId=s_xxx&ticket=short-lived-one-time-value
 { "type": "status", "status": "reconnecting" }
 { "type": "exit", "code": 0 }
 { "type": "error", "message": "Connection closed by remote host" }
+{ "type": "metrics", "metrics": { "system": {}, "cpuPercent": 1.2, "memory": {}, "interfaces": [], "disks": [] }
 ```
 
 `disconnected` 仅表示远程 SSH 连接失效，不代表本地 WebSocket 断开。`exit` 表示远程 shell 正常退出或逻辑会话结束，不用于普通的网络断线。

@@ -50,7 +50,6 @@ func suffixPrefixLength(data, prefix []byte) int {
 }
 
 func shellIntegration() string {
-	return `case "$SHELL" in *bash) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }printf '\033]7;%s\007' \"\$PWD\"" ;; *zsh) precmd() { printf '\033]7;%s\007' "$PWD"; } ;; esac
-stty echo
+	return `case "$SHELL" in *bash) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}printf '\033]7;%s\007' \"\$PWD\"" ;; *zsh) precmd() { printf '\033]7;%s\007' "$PWD"; } ;; esac; printf '\033[1A\033[2K\033[B'; stty echo
 `
 }

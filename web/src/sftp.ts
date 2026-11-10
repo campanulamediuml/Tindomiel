@@ -4,10 +4,18 @@ import type { TransferCenter } from './transfer';
 import type { FileEntry } from './types';
 import { element, formatSize, joinPath, messageOf, parentPath } from './utils';
 
+interface DirectoryView {
+  path: string;
+  entries: FileEntry[];
+}
+
 export class SftpPanel {
   private sessionId?: string;
   private currentPath = '/';
-  private readonly paths = new Map<string, string>();
+  private readonly views = new Map<string, DirectoryView>();
+  private entries: FileEntry[] = [];
+  private sortKey: 'name' | 'mtime' | 'ctime' = 'name';
+  private sortDirection = 1;
   private readonly selected = new Set<string>();
   private readonly fileTypes = new Map<string, FileEntry['type']>();
   private loadVersion = 0;
@@ -23,6 +31,9 @@ export class SftpPanel {
     this.tree = new RemoteTree(api, (path) => void this.load(path), onError);
     element<HTMLButtonElement>('sftp-up').addEventListener('click', () => void this.load(parentPath(this.currentPath)));
     element<HTMLButtonElement>('sftp-refresh').addEventListener('click', () => void this.load());
+    element<HTMLButtonElement>('sort-file-name').addEventListener('click', () => this.changeSort('name'));
+    element<HTMLButtonElement>('sort-file-mtime').addEventListener('click', () => this.changeSort('mtime'));
+    element<HTMLButtonElement>('sort-file-ctime').addEventListener('click', () => this.changeSort('ctime'));
     element<HTMLButtonElement>('copy-path').addEventListener('click', () => {
       void navigator.clipboard.writeText(this.currentPath).then(() => this.onError(`已复制 ${this.currentPath}`));
     });
@@ -76,18 +87,31 @@ export class SftpPanel {
 
   async setSession(sessionId?: string): Promise<void> {
     if (this.sessionId === sessionId) return;
-    if (this.sessionId) this.paths.set(this.sessionId, this.currentPath);
+    if (this.sessionId) this.views.set(this.sessionId, { path: this.currentPath, entries: this.entries });
     this.sessionId = sessionId;
     this.loadVersion += 1;
     this.selected.clear();
-    this.fileList.replaceChildren();
     if (!sessionId) {
       this.currentPath = '/';
       this.pathInput.value = '/';
+      this.entries = [];
+      this.fileList.replaceChildren();
       await this.tree.setSession(undefined);
       return;
     }
-    this.currentPath = this.paths.get(sessionId) ?? '.';
+    const cached = this.views.get(sessionId);
+    if (cached) {
+      this.currentPath = cached.path;
+      this.pathInput.value = cached.path;
+      this.entries = cached.entries;
+      this.render();
+      await this.tree.setSession(sessionId);
+      this.tree.setCurrent(this.currentPath);
+      return;
+    }
+    this.currentPath = '.';
+    this.entries = [];
+    this.fileList.textContent = '读取中…';
     await Promise.all([this.tree.setSession(sessionId), this.load(this.currentPath)]);
   }
 
@@ -98,12 +122,15 @@ export class SftpPanel {
     this.fileList.textContent = '读取中…';
     try {
       const absolute = await this.api.realpath(sessionId, remotePath);
-      const entries = await this.api.listFiles(sessionId, absolute);
       if (this.sessionId !== sessionId || this.loadVersion !== version) return;
       this.currentPath = absolute;
       this.pathInput.value = absolute;
+      const entries = await this.api.listFiles(sessionId, absolute);
+      if (this.sessionId !== sessionId || this.loadVersion !== version) return;
+      this.entries = entries;
+      this.views.set(sessionId, { path: absolute, entries });
       this.selected.clear();
-      this.render(entries);
+      this.render();
       this.tree.setCurrent(absolute);
     } catch (error) {
       if (this.sessionId !== sessionId || this.loadVersion !== version) return;
@@ -112,11 +139,20 @@ export class SftpPanel {
     }
   }
 
-  private render(entries: FileEntry[]): void {
+  private render(): void {
+    const entries = [...this.entries].sort((left, right) => {
+      if ((left.type === 'directory') !== (right.type === 'directory')) return left.type === 'directory' ? -1 : 1;
+      if (this.sortKey === 'mtime') return (left.mtime - right.mtime) * this.sortDirection;
+      if (this.sortKey === 'ctime') return (left.created - right.created) * this.sortDirection;
+      return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' }) * this.sortDirection;
+    });
     this.fileList.replaceChildren();
     this.fileTypes.clear();
     for (const entry of entries) this.fileTypes.set(entry.name, entry.type);
     this.updateSelection();
+    element<HTMLButtonElement>('sort-file-name').textContent = `文件名 ${this.sortKey === 'name' ? (this.sortDirection > 0 ? '↑' : '↓') : ''}`;
+    element<HTMLButtonElement>('sort-file-mtime').textContent = `最近修改 ${this.sortKey === 'mtime' ? (this.sortDirection > 0 ? '↑' : '↓') : ''}`;
+    element<HTMLButtonElement>('sort-file-ctime').textContent = `创建时间 ${this.sortKey === 'ctime' ? (this.sortDirection > 0 ? '↑' : '↓') : ''}`;
     if (entries.length === 0) {
       this.fileList.textContent = '空目录';
       return;
@@ -132,13 +168,13 @@ export class SftpPanel {
       name.title = joinPath(this.currentPath, entry.name);
       const size = document.createElement('span');
       size.textContent = entry.type === 'directory' ? '—' : formatSize(entry.size);
-      const type = document.createElement('span');
-      type.textContent = entry.type === 'directory' ? '文件夹' : entry.type === 'symlink' ? '链接' : '文件';
       const modified = document.createElement('span');
       modified.textContent = new Date(entry.mtime * 1000).toLocaleString('zh-CN', { hour12: false });
+      const created = document.createElement('span');
+      created.textContent = entry.created > 0 ? new Date(entry.created * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
       const permissions = document.createElement('span');
       permissions.textContent = entry.permissions;
-      row.append(name, size, type, modified, permissions);
+      row.append(name, size, modified, created, permissions);
       row.addEventListener('click', (event) => this.select(entry.name, event.metaKey || event.ctrlKey));
       row.addEventListener('dblclick', () => void this.open(entry));
       if (entry.type === 'file') {
@@ -156,6 +192,15 @@ export class SftpPanel {
       });
       this.fileList.append(row);
     }
+  }
+
+  private changeSort(key: 'name' | 'mtime' | 'ctime'): void {
+    if (this.sortKey === key) this.sortDirection *= -1;
+    else {
+      this.sortKey = key;
+      this.sortDirection = key === 'name' ? 1 : -1;
+    }
+    this.render();
   }
 
   private select(name: string, toggle: boolean): void {

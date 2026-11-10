@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -285,6 +286,7 @@ type fileEntry struct {
 	Type        string `json:"type"`
 	Size        int64  `json:"size"`
 	Mtime       int64  `json:"mtime"`
+	Created     int64  `json:"created"`
 	Permissions string `json:"permissions"`
 }
 
@@ -315,6 +317,7 @@ func (s *Server) sftpList(w http.ResponseWriter, r *http.Request) {
 	remotePath := requestedPath(r)
 	entries, err := client.ReadDir(remotePath)
 	if err != nil {
+		slog.Warn("sftp_list_failed", "path", remotePath, "error", err)
 		writeError(w, http.StatusBadGateway, "SFTP_LIST_FAILED", err.Error())
 		return
 	}
@@ -327,6 +330,24 @@ func (s *Server) sftpList(w http.ResponseWriter, r *http.Request) {
 			kind = "symlink"
 		}
 		result = append(result, fileEntry{Name: entry.Name(), Type: kind, Size: entry.Size(), Mtime: entry.ModTime().Unix(), Permissions: entry.Mode().String()})
+	}
+	if len(result) > 0 {
+		found := s.listSession(w, r)
+		if found == nil {
+			return
+		}
+		paths := make([]string, len(result))
+		for index, entry := range result {
+			paths[index] = path.Join(remotePath, entry.Name)
+		}
+		creationTimes, err := found.FileCreationTimes(paths)
+		if err != nil {
+			slog.Warn("file_creation_times_failed", "path", remotePath, "error", err)
+		} else {
+			for index, remoteFilePath := range paths {
+				result[index].Created = creationTimes[remoteFilePath]
+			}
+		}
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if (result[i].Type == "directory") != (result[j].Type == "directory") {

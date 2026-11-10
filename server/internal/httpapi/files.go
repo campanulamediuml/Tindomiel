@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log/slog"
 	"net/http"
 )
 
@@ -20,6 +21,7 @@ func (s *Server) sftpRealpath(w http.ResponseWriter, r *http.Request) {
 	defer client.Close()
 	resolved, err := client.RealPath(requestedPath(r))
 	if err != nil {
+		slog.Warn("sftp_realpath_failed", "path", requestedPath(r), "error", err)
 		writeError(w, http.StatusBadGateway, "SFTP_REALPATH_FAILED", err.Error())
 		return
 	}
