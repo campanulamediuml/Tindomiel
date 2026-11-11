@@ -65,6 +65,8 @@ function updateDownloadPath(path: string): void {
 
 function bindEvents(): void {
   document.addEventListener('contextmenu', (event) => event.preventDefault());
+  document.addEventListener('keydown', handleTerminalPasteShortcut, true);
+  document.addEventListener('paste', handleTerminalPaste, true);
   document.addEventListener('scroll', () => {
     document.documentElement.scrollLeft = 0;
     document.body.scrollLeft = 0;
@@ -100,6 +102,10 @@ function bindEvents(): void {
     connectionMenu.hidden = true;
     void connections.newProfile().catch((error) => showToast(messageOf(error)));
   });
+  element<HTMLButtonElement>('menu-local-shell').addEventListener('click', () => {
+    connectionMenu.hidden = true;
+    void connect(localProfile());
+  });
   element<HTMLButtonElement>('menu-open-manager').addEventListener('click', () => {
     connectionMenu.hidden = true;
     void connections.open();
@@ -121,6 +127,23 @@ function bindEvents(): void {
       showToast(`下载目录已更改为：${path}`);
     }).catch((error) => showToast(messageOf(error)));
   });
+}
+
+function handleTerminalPasteShortcut(event: KeyboardEvent): void {
+  if (!event.metaKey || event.ctrlKey || event.altKey || event.key.toLowerCase() !== 'v' || !isTerminalPasteTarget(event)) return;
+  event.stopImmediatePropagation();
+}
+
+function handleTerminalPaste(event: ClipboardEvent): void {
+  if (!isTerminalPasteTarget(event)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const text = event.clipboardData?.getData('text/plain');
+  if (text) activeTerminal()?.terminal.paste(text);
+}
+
+function isTerminalPasteTarget(event: Event): boolean {
+  return event.target instanceof HTMLElement && event.target.closest('.terminal-view') !== null;
 }
 
 function enableTabDragScroll(): void {
@@ -171,6 +194,17 @@ function reorderTabs(draggedId: string, targetId: string, insertAfter: boolean):
   tabs.clear();
   for (const [id, tab] of entries) tabs.set(id, tab);
   renderTabs();
+}
+
+function localProfile(): Profile {
+  return {
+    id: 'local:shell',
+    name: '本机 Shell',
+    remark: '',
+    folder: '',
+    source: 'custom',
+    options: { host: '127.0.0.1', port: 22, user: '', auth: 'publicKey', privateKeys: [] },
+  };
 }
 
 async function connect(profile: Profile): Promise<void> {

@@ -67,7 +67,7 @@ export class RemoteTree {
   async refresh(): Promise<void> {
     this.nodes.clear();
     if (this.sessionId) {
-      for (const path of this.expanded) await this.load(path);
+      await Promise.all(Array.from(this.expanded, (path) => this.load(path)));
     }
     this.render();
   }

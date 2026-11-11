@@ -19,14 +19,24 @@ func (s *Session) FileCreationTimes(remotePaths []string) (map[string]int64, err
 		return nil, err
 	}
 	windows := bytes.Contains(client.Conn.ServerVersion(), []byte("OpenSSH_for_Windows"))
+	darwin := false
+	if !windows {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		output, unameErr := s.exec(ctx, "uname -s")
+		cancel()
+		darwin = unameErr == nil && bytes.Contains(bytes.ToLower(output), []byte("darwin"))
+	}
 	for start := 0; start < len(remotePaths); start += 50 {
 		end := min(start+50, len(remotePaths))
 		batch := remotePaths[start:end]
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		var output []byte
-		if windows {
+		switch {
+		case windows:
 			output, err = s.windowsCreationTimes(ctx, batch)
-		} else {
+		case darwin:
+			output, err = s.darwinCreationTimes(ctx, batch)
+		default:
 			output, err = s.linuxCreationTimes(ctx, batch)
 		}
 		cancel()
@@ -48,6 +58,10 @@ func (s *Session) FileCreationTimes(remotePaths []string) (map[string]int64, err
 
 func (s *Session) linuxCreationTimes(ctx context.Context, remotePaths []string) ([]byte, error) {
 	return s.exec(ctx, `stat --printf='%W\0' -- `+quoteRemotePaths(remotePaths, " "))
+}
+
+func (s *Session) darwinCreationTimes(ctx context.Context, remotePaths []string) ([]byte, error) {
+	return s.exec(ctx, `stat -f '%B' -- `+quoteRemotePaths(remotePaths, " ")+` | tr '\n' '\0'`)
 }
 
 func (s *Session) windowsCreationTimes(ctx context.Context, remotePaths []string) ([]byte, error) {

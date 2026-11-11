@@ -39,6 +39,7 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - 优先使用 SSH Agent 和现有私钥，私钥不进入前端
 - **SessionManager**
   - 一个后端进程托管多个相互独立的 SSH 会话；同一主机的多个标签页也不共享 shell
+  - 内置 `local:shell` 使用当前 macOS 用户和默认密钥连接 `127.0.0.1:22`，不保存额外 profile，完整复用 SSH 终端、SFTP、资源监控和重连；macOS 未开启“远程登录”时在标签内显示连接错误
   - 每个标签页对应独立 SSH TCP 长连接、远程 shell、SFTP channel 和转发 goroutine
   - 逻辑会话状态：`connecting → ready → disconnected → reconnecting → ready`，显式关闭后进入 `closed`
   - 远程断线后的自动或手动重连沿用原 `sessionId`，但建立的是新的 SSH 连接和远程 shell
@@ -60,7 +61,7 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - 文件夹任务聚合总字节数和进度，通过 `currentPath` 实时报告当前远程文件
   - 通过 RealPath 将当前目录规范化为绝对路径；目录树从 `/` 按需读取
   - 前端按会话缓存目录树节点、展开状态、当前路径和文件列表，切换只恢复展示；手动刷新、进入目录、路径联动或上传完成后才重新读取，目录树节点 Map 按会话隔离
-  - 文件列表初始目录优先、名称升序，支持名称、mtime、创建时间点击排序及列宽拖拽；Linux 通过 GNU `stat %W` 批量获取出生时间，Windows 通过 PowerShell `CreationTimeUtc` 逐项容错获取；SFTP 的 `/C:/...` 规范路径在查询前转换为 PowerShell 使用的 `C:/...`，未知值返回 0 并显示 `—`
+  - 文件列表初始目录优先、名称升序，支持名称、mtime、创建时间点击排序及列宽拖拽；Linux 通过 GNU `stat %W` 批量获取出生时间，macOS 通过 BSD `stat -f %B` 和 NUL 分隔批量获取，Windows 通过 PowerShell `CreationTimeUtc` 逐项容错获取；SFTP 的 `/C:/...` 规范路径在查询前转换为 PowerShell 使用的 `C:/...`，未知值返回 0 并显示 `—`
   - 缓存编辑将文件放入用户缓存目录下的会话私有目录（0700 / 0600），调用 macOS `open` 打开
   - 监听缓存目录而非单个文件 inode，兼容 VSCode 原子保存；事件去抖后自动上传原远程路径
   - 会话关闭时停止文件监听；远程断线时保留监听，保存失败通过 WS 通知前端
@@ -68,7 +69,8 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
 - **ResourceMonitor**
   - 通过独立 SSH channel 采集 CPU、内存、交换、进程、网卡、磁盘、运行时间和负载
   - 通过 `uname -s` 区分 Linux、macOS（Darwin）和 Windows；Linux 读取 `/proc`、`df` 和 `ps`，macOS 使用 `top`、`vm_stat`、`vm.swapusage`、`netstat`、`df` 和 `ps`，Windows 使用 PowerShell/CIM，交换空间读取 `Win32_PageFileUsage` 的实际分页文件总量和已用量
-  - Windows 命令优先通过 UTF-16LE Base64 的 `powershell -NoProfile -NonInteractive -EncodedCommand` 执行；服务端拒绝 exec 时，使用独立的交互 Shell channel 回退，PTY 类型为 `dumb`，先尝试 PowerShell 原生命令，再兼容 `cmd.exe` 中的 EncodedCommand
+  - Windows 优先通过 UTF-16LE Base64 的 `powershell -NoProfile -NonInteractive -EncodedCommand` 执行 CIM 采集；服务端拒绝 exec 时，使用独立的交互 Shell channel 回退，PTY 类型为 `dumb`
+  - 默认 `cmd.exe` 禁止启动 PowerShell时，自动改用 Windows 自带的 `systeminfo` 和带引号的 `typeperf` 英文计数器采集，不再依赖嵌套 PowerShell；采集器选择按会话缓存，避免每次监控重复探测
   - Windows 回退结果使用 Base64 短行分块，每块带序号和总数，后端校验缺块、重块、顺序和 UTF-8 后解码，避免 ConPTY 改写长行；解码后的监控数据采用 `SYS|...`、`PROC|...`、`NET|...`、`DISK|...` 等键值文本协议，不依赖终端中的 JSON 或提示符位置
   - CPU 和网络速率使用采样差值；本机 ping 目标 IP 获取延迟
   - 每个逻辑会话由 Manager 启动一个后台监控 goroutine，持续采集并更新该 Session 的互斥快照缓存，关闭会话时停止并等待 goroutine 退出
@@ -115,7 +117,7 @@ WebSocket 异常关闭不等于 SSH 会话关闭。前端重新加载后可以�
    - 主机密钥校验属于连接安全边界，从 M1 开始实现，不能默认信任任意主机密钥
 4. **复制与粘贴**
    - 前端支持 bracketed paste，多行粘贴不被逐行执行
-   - macOS 的 Cmd+C 复制选区、Cmd+V 读取剪贴板并粘贴；事件显式 `preventDefault()` 和 `stopPropagation()`，避免 WebView 再弹出系统 Paste 菜单
+   - macOS 的 Cmd+C 复制选区；Cmd+V 仅拦截 xterm 的重复快捷键处理，由原生 `paste` 事件提供剪贴板文本，显式阻止默认行为和传播后走 bracketed paste，避免 WebView 弹出系统 Paste 菜单及 `navigator.clipboard.readText` 权限请求
 5. **应用内交互组件**
    - 删除确认、未知主机确认和下拉选择均使用应用内组件，不依赖桌面 WebView 中行为不一致的 `window.confirm()` 或原生 `<select>` 弹层
    - 删除 custom profile 会永久移除；删除 OpenSSH profile 仅将其加入隐藏列表

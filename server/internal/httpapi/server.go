@@ -302,6 +302,11 @@ func (s *Server) sftpClient(w http.ResponseWriter, r *http.Request) (*sftp.Clien
 	}
 	client, err := sftp.NewClient(sshClient)
 	if err != nil {
+		if strings.Contains(err.Error(), "subsystem request failed") {
+			slog.Warn("sftp_unavailable", "error", err)
+			writeError(w, http.StatusBadGateway, "SFTP_UNAVAILABLE", "远端未启用或无法提供 SFTP")
+			return nil, false
+		}
 		writeError(w, http.StatusBadGateway, "SFTP_FAILED", err.Error())
 		return nil, false
 	}

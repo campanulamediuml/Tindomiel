@@ -1,7 +1,7 @@
 import type { Api } from './api';
 import { RemoteTree } from './tree';
 import type { TransferCenter } from './transfer';
-import type { FileEntry } from './types';
+import { ApiError, type FileEntry } from './types';
 import { element, formatSize, joinPath, messageOf, parentPath } from './utils';
 
 interface DirectoryView {
@@ -134,7 +134,7 @@ export class SftpPanel {
       this.tree.setCurrent(absolute);
     } catch (error) {
       if (this.sessionId !== sessionId || this.loadVersion !== version) return;
-      this.fileList.textContent = '目录读取失败';
+      this.fileList.textContent = error instanceof ApiError && error.code === 'SFTP_UNAVAILABLE' ? error.message : '目录读取失败';
       this.onError(messageOf(error));
     }
   }

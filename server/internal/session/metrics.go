@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -73,13 +74,14 @@ type networkSample struct {
 }
 
 type metricsState struct {
-	mu        sync.Mutex
-	os        string
-	cpuTotal  uint64
-	cpuIdle   uint64
-	network   map[string]networkSample
-	sampledAt time.Time
-	latest    *ResourceMetrics
+	mu               sync.Mutex
+	os               string
+	windowsCollector string
+	cpuTotal         uint64
+	cpuIdle          uint64
+	network          map[string]networkSample
+	sampledAt        time.Time
+	latest           *ResourceMetrics
 }
 
 func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
@@ -184,6 +186,9 @@ func (s *Session) linuxMetrics(ctx context.Context) (ResourceMetrics, error) {
 }
 
 func (s *Session) windowsMetrics(ctx context.Context) (ResourceMetrics, error) {
+	if s.metrics.windowsCollector == "cmd" {
+		return s.cmdMetrics(ctx)
+	}
 	script := `[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);` +
 		`$os=Get-CimInstance Win32_OperatingSystem;` +
 		`$cpu=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;` +
@@ -205,11 +210,21 @@ func (s *Session) windowsMetrics(ctx context.Context) (ResourceMetrics, error) {
 		`$d | ForEach-Object { "DISK|$($_.DeviceID)|$($_.Size)|$($_.FreeSpace)" }`
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	output, err := s.exec(ctx, powershellCommand(script))
-	if err != nil {
-		return ResourceMetrics{}, fmt.Errorf("read Windows metrics: %w", err)
+	output, powerShellErr := s.exec(ctx, powershellCommand(script))
+	if powerShellErr == nil {
+		result := parseWindowsTextMetrics(output)
+		if result.System.OSName != "" && result.Memory.Total > 0 && len(result.Processes) > 0 {
+			s.metrics.windowsCollector = "powershell"
+			return result, nil
+		}
+		powerShellErr = fmt.Errorf("PowerShell returned incomplete metrics")
 	}
-	return parseWindowsTextMetrics(output), nil
+	result, cmdErr := s.cmdMetrics(ctx)
+	if cmdErr != nil {
+		return ResourceMetrics{}, fmt.Errorf("PowerShell metrics: %v; cmd metrics: %w", powerShellErr, cmdErr)
+	}
+	s.metrics.windowsCollector = "cmd"
+	return result, nil
 }
 
 func parseWindowsTextMetrics(output []byte) ResourceMetrics {
@@ -294,6 +309,10 @@ func (s *Session) exec(ctx context.Context, command string) ([]byte, error) {
 			done <- response{output: output}
 			return
 		}
+		if !bytes.Contains(client.Conn.ServerVersion(), []byte("OpenSSH_for_Windows")) {
+			done <- response{output: output, err: err}
+			return
+		}
 		if script, ok := powerShellScript(command); ok {
 			raw, rawErr := runPowerShellEncodedResult(ctx, client, script)
 			if rawErr == nil {
@@ -367,7 +386,7 @@ func splitSections(output string) map[string]string {
 		builder.Reset()
 	}
 	for line := range strings.SplitSeq(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
-		if name, ok := strings.CutPrefix(line, "__"); ok {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "__"); ok {
 			if name, valid := strings.CutSuffix(name, "__"); valid {
 				flush()
 				current = name

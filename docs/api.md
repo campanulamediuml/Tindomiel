@@ -90,6 +90,8 @@ DELETE /api/sessions/:id
 → { "ok": true }
 ```
 
+内置 `profileId` 为 `local:shell` 时，后端使用当前 macOS 用户、`127.0.0.1:22`、默认私钥和 SSH Agent 创建本机 SSH 会话，不保存额外的连接配置；主机指纹确认、SFTP、资源监控和重连均复用普通 SSH 流程。macOS 需要在“系统设置 → 通用 → 共享 → 远程登录”中启用 SSH 服务。
+
 状态取值：`connecting | ready | disconnected | reconnecting | closed | error`。
 
 每个标签页创建独立会话。远程断线后的重连沿用逻辑 `sessionId`，但会建立新的 SSH 连接和远程 shell；接口不承诺恢复原 shell 或工作现场。显式 `DELETE` 才销毁逻辑会话，本地 WS 异常关闭不自动销毁 SSH 会话。
@@ -128,6 +130,8 @@ POST /api/host-keys/accept
 
 ### SFTP
 
+远端拒绝 SFTP subsystem 时，相关接口返回 `502` 和 `SFTP_UNAVAILABLE`，消息为“远端未启用或无法提供 SFTP”；前端文件区域直接展示该状态，不再显示为普通目录读取失败。原始服务端错误保留在后端日志中。
+
 ```
 GET  /api/sftp/:sessionId/list?path=/home/ubuntu
 → [{ "name": "config.json", "type": "file", "size": 4221, "mtime": 1731200000, "created": 1731100000 }]
@@ -151,7 +155,7 @@ POST /api/sftp/:sessionId/download-directory
 → { "path": "/Users/me/Downloads/project", "files": 42, "bytes": 5330944 }
 ```
 
-`created` 为 Unix 秒时间戳，表示远程文件出生时间。Linux 使用 GNU `stat --printf='%W\0'` 每 50 个路径批量查询；Windows 使用 PowerShell `CreationTimeUtc` 逐项容错查询，并将 SFTP 的 `/C:/...` 路径规范化为 `C:/...` 后执行。无法获取时为 0，前端显示 `—`，不会用 `mtime` 代替。
+`created` 为 Unix 秒时间戳，表示远程文件出生时间。Linux 使用 GNU `stat --printf='%W\0'` 每 50 个路径批量查询；macOS 使用 BSD `stat -f '%B'` 并通过 `tr` 转为 NUL 分隔；Windows 使用 PowerShell `CreationTimeUtc` 逐项容错查询，并将 SFTP 的 `/C:/...` 路径规范化为 `C:/...` 后执行。无法获取时为 0，前端显示 `—`，不会用 `mtime` 代替。非 Windows 命令失败会立即返回，不进入交互 Shell 回退；目录树展开节点并行加载。
 
 上传下载不得先将整个文件读入内存。界面中的普通文件和文件夹下载均通过 POST 接口直接写入用户选择的下载目录，完成后返回实际本地路径；同名文件在扩展名前加 `-1`、`-2`，同名目录在名称后加序号，不覆盖已有内容。每个文件先写临时文件再原子改名。GET 下载 ticket 接口保留用于直接流式下载。
 
@@ -199,7 +203,7 @@ GET /api/metrics/:sessionId
 
 后端通过 `uname -s` 区分 Linux、macOS（Darwin）和 Windows。macOS 监控使用系统自带 `top`、`vm_stat`、`vm.swapusage`、`netstat`、`df` 和 `ps`，无需安装远端依赖。
 
-Windows 同时兼容 `cmd.exe` 和 PowerShell 默认 Shell。采集命令使用 UTF-16LE Base64 的 `EncodedCommand`；远端拒绝 exec 时改用独立交互 Shell（`TERM=dumb`），PowerShell 原生执行失败后由 `cmd.exe` 回退。结果按带序号的 Base64 短行返回并校验完整性，解码为 `SYS|...`、`PROC|...`、`NET|...`、`DISK|...` 键值文本，避免 ConPTY 长行控制序列污染。Windows 创建时间查询中的 `/C:/...` 会转换为 `C:/...`；交换空间来自 `Win32_PageFileUsage`。
+Windows 同时兼容 `cmd.exe` 和 PowerShell 默认 Shell。PowerShell 采集使用 UTF-16LE Base64 的 `EncodedCommand`；远端拒绝 exec 时改用独立交互 Shell（`TERM=dumb`），结果按带序号的 Base64 短行返回并校验完整性，解码为 `SYS|...`、`PROC|...`、`NET|...`、`DISK|...` 键值文本，避免 ConPTY 长行控制序列污染。若 `cmd.exe` 禁止启动 PowerShell，监控自动切换并缓存到 `systeminfo` + `typeperf` 原生采集路径，不再依赖嵌套 PowerShell。Windows 创建时间查询中的 `/C:/...` 会转换为 `C:/...`；PowerShell 采集的交换空间来自 `Win32_PageFileUsage`，`cmd` 采集结合虚拟内存总量和分页文件使用率。
 
 ## WebSocket：终端
 

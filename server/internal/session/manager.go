@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os/user"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 const (
 	maxPendingOutput = 256 * 1024
 	maxReconnectTry  = 5
+	LocalProfileID   = "local:shell"
 )
 
 type Status string
@@ -55,7 +57,10 @@ func NewManager(store *configstore.Store, hostKeys *sshconn.HostKeys) *Manager {
 }
 
 func (m *Manager) Create(ctx context.Context, profileID string, cols, rows int) (*Session, error) {
-	profile, err := m.store.Get(ctx, profileID)
+	profile, err := localProfile(profileID)
+	if profileID != LocalProfileID {
+		profile, err = m.store.Get(ctx, profileID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +86,33 @@ func (m *Manager) Create(ctx context.Context, profileID string, cols, rows int) 
 	m.mu.Unlock()
 	slog.Info("session_created", "sessionId", session.id)
 	return session, nil
+}
+
+func localProfile(profileID string) (configstore.Profile, error) {
+	if profileID != LocalProfileID {
+		return configstore.Profile{}, nil
+	}
+	current, err := user.Current()
+	if err != nil {
+		return configstore.Profile{}, fmt.Errorf("read current user: %w", err)
+	}
+	keys := sshconn.DefaultPrivateKeys()
+	paths := make([]string, 0, len(keys))
+	for _, key := range keys {
+		paths = append(paths, key.Path)
+	}
+	return configstore.Profile{
+		ID:     LocalProfileID,
+		Name:   "本机 Shell",
+		Source: "local",
+		Options: configstore.Options{
+			Host:        "127.0.0.1",
+			Port:        22,
+			User:        current.Username,
+			Auth:        "publicKey",
+			PrivateKeys: paths,
+		},
+	}, nil
 }
 
 func (m *Manager) Get(id string) (*Session, error) {
