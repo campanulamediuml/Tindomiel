@@ -373,6 +373,7 @@ function closeTab(sessionId: string): void {
       void sftp.setSession(undefined).catch((error) => showToast(messageOf(error)));
     }
   }
+  sftp.removeSession(sessionId);
   renderTabs();
 }
 

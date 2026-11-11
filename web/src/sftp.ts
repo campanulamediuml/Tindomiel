@@ -4,6 +4,11 @@ import type { TransferCenter } from './transfer';
 import { ApiError, type FileEntry } from './types';
 import { element, formatSize, joinPath, messageOf, parentPath } from './utils';
 
+const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+});
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
 interface DirectoryView {
   path: string;
   entries: FileEntry[];
@@ -85,6 +90,11 @@ export class SftpPanel {
     });
   }
 
+  removeSession(sessionId: string): void {
+    this.views.delete(sessionId);
+    this.tree.removeSession(sessionId);
+  }
+
   async setSession(sessionId?: string): Promise<void> {
     if (this.sessionId === sessionId) return;
     if (this.sessionId) this.views.set(this.sessionId, { path: this.currentPath, entries: this.entries });
@@ -131,6 +141,7 @@ export class SftpPanel {
       this.views.set(sessionId, { path: absolute, entries });
       this.selected.clear();
       this.render();
+      this.tree.setDirectory(absolute, entries);
       this.tree.setCurrent(absolute);
     } catch (error) {
       if (this.sessionId !== sessionId || this.loadVersion !== version) return;
@@ -144,7 +155,7 @@ export class SftpPanel {
       if ((left.type === 'directory') !== (right.type === 'directory')) return left.type === 'directory' ? -1 : 1;
       if (this.sortKey === 'mtime') return (left.mtime - right.mtime) * this.sortDirection;
       if (this.sortKey === 'ctime') return (left.created - right.created) * this.sortDirection;
-      return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' }) * this.sortDirection;
+      return nameCollator.compare(left.name, right.name) * this.sortDirection;
     });
     this.fileList.replaceChildren();
     this.fileTypes.clear();
@@ -157,6 +168,7 @@ export class SftpPanel {
       this.fileList.textContent = '空目录';
       return;
     }
+    const fragment = document.createDocumentFragment();
     for (const entry of entries) {
       const row = document.createElement('div');
       row.className = 'file-row';
@@ -169,9 +181,9 @@ export class SftpPanel {
       const size = document.createElement('span');
       size.textContent = entry.type === 'directory' ? '—' : formatSize(entry.size);
       const modified = document.createElement('span');
-      modified.textContent = new Date(entry.mtime * 1000).toLocaleString('zh-CN', { hour12: false });
+      modified.textContent = dateTimeFormatter.format(entry.mtime * 1000);
       const created = document.createElement('span');
-      created.textContent = entry.created > 0 ? new Date(entry.created * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+      created.textContent = entry.created > 0 ? dateTimeFormatter.format(entry.created * 1000) : '—';
       const permissions = document.createElement('span');
       permissions.textContent = entry.permissions;
       row.append(name, size, modified, created, permissions);
@@ -190,8 +202,9 @@ export class SftpPanel {
       row.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') void this.open(entry);
       });
-      this.fileList.append(row);
+      fragment.append(row);
     }
+    this.fileList.append(fragment);
   }
 
   private changeSort(key: 'name' | 'mtime' | 'ctime'): void {

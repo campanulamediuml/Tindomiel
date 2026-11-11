@@ -295,12 +295,11 @@ func (s *Server) sftpClient(w http.ResponseWriter, r *http.Request) (*sftp.Clien
 	if found == nil {
 		return nil, false
 	}
-	sshClient, err := found.Client()
-	if err != nil {
+	client, err := found.SFTPClient()
+	if err != nil && strings.Contains(err.Error(), "SSH session is not ready") {
 		writeError(w, http.StatusConflict, "SSH_NOT_READY", err.Error())
 		return nil, false
 	}
-	client, err := sftp.NewClient(sshClient)
 	if err != nil {
 		if strings.Contains(err.Error(), "subsystem request failed") {
 			slog.Warn("sftp_unavailable", "error", err)
@@ -318,7 +317,6 @@ func (s *Server) sftpList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer client.Close()
 	remotePath := requestedPath(r)
 	entries, err := client.ReadDir(remotePath)
 	if err != nil {
@@ -381,7 +379,6 @@ func (s *Server) sftpDownload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer client.Close()
 	remotePath := requestedPath(r)
 	file, err := client.Open(remotePath)
 	if err != nil {
@@ -408,7 +405,6 @@ func (s *Server) sftpUpload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer client.Close()
 	reader, err := r.MultipartReader()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_MULTIPART", err.Error())

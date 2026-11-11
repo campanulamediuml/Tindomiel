@@ -18,6 +18,7 @@ import (
 	"tindomiel/internal/sshconn"
 
 	"github.com/coder/websocket"
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -183,9 +184,15 @@ type Session struct {
 	editors         *editorManager
 	cwd             string
 
-	writeMu     sync.Mutex
-	monitorStop chan struct{}
-	monitorWG   sync.WaitGroup
+	writeMu        sync.Mutex
+	sftpMu         sync.Mutex
+	sftp           *sftp.Client
+	sftpGeneration uint64
+	newSFTPClient  func(*ssh.Client) (*sftp.Client, error)
+	fileTimesMu    sync.RWMutex
+	fileTimesOS    string
+	monitorStop    chan struct{}
+	monitorWG      sync.WaitGroup
 }
 
 func (s *Session) ID() string {
@@ -211,6 +218,61 @@ func (s *Session) Client() (*ssh.Client, error) {
 		return nil, errors.New("SSH session is not ready")
 	}
 	return s.client, nil
+}
+
+func (s *Session) SFTPClient() (*sftp.Client, error) {
+	s.sftpMu.Lock()
+	defer s.sftpMu.Unlock()
+	s.mu.RLock()
+	if s.status != Ready || s.client == nil {
+		s.mu.RUnlock()
+		return nil, errors.New("SSH session is not ready")
+	}
+	sshClient := s.client
+	generation := s.generation
+	cached := s.sftp
+	cachedGeneration := s.sftpGeneration
+	s.mu.RUnlock()
+	if cached != nil && cachedGeneration == generation {
+		return cached, nil
+	}
+	factory := s.newSFTPClient
+	if factory == nil {
+		factory = func(client *ssh.Client) (*sftp.Client, error) {
+			return sftp.NewClient(client)
+		}
+	}
+	created, err := factory(sshClient)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.status != Ready || s.client != sshClient || s.generation != generation {
+		s.mu.Unlock()
+		_ = created.Close()
+		return nil, errors.New("SSH session is not ready")
+	}
+	previous := s.sftp
+	s.sftp = created
+	s.sftpGeneration = generation
+	s.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
+	return created, nil
+}
+
+func (s *Session) closeSFTP() {
+	s.sftpMu.Lock()
+	s.mu.Lock()
+	client := s.sftp
+	s.sftp = nil
+	s.sftpGeneration = 0
+	s.mu.Unlock()
+	s.sftpMu.Unlock()
+	if client != nil {
+		_ = client.Close()
+	}
 }
 
 func (s *Session) WriteInput(data []byte) error {
@@ -307,6 +369,7 @@ func (s *Session) Close() {
 	s.stdin = nil
 	s.ws = nil
 	s.mu.Unlock()
+	s.closeSFTP()
 	close(s.monitorStop)
 	if stdin != nil {
 		stdin.Close()
@@ -328,6 +391,7 @@ func (s *Session) open(initialStatus Status) error {
 	if closed {
 		return errors.New("session is closed")
 	}
+	s.closeSFTP()
 	client, err := sshconn.Dial(s.profile, s.manager.hostKeys)
 	if err != nil {
 		return err
@@ -402,7 +466,7 @@ func (s *Session) forward(_ *websocket.Conn, reader io.Reader) {
 	for {
 		count, err := reader.Read(buffer)
 		if count > 0 {
-			clean, cwd, found := parser.feed(bytes.Clone(buffer[:count]))
+			clean, cwd, found := parser.feed(buffer[:count])
 			if len(clean) > 0 {
 				s.emit(clean)
 			}
@@ -439,6 +503,7 @@ func (s *Session) watch(client *ssh.Client, shell *ssh.Session, generation uint6
 	s.shell = nil
 	s.stdin = nil
 	s.mu.Unlock()
+	s.closeSFTP()
 	if cleanExit {
 		slog.Info("session_closed", "sessionId", s.id, "code", exitCode(err))
 		s.sendControl(map[string]any{"type": "exit", "code": exitCode(err)})

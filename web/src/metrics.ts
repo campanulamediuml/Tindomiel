@@ -13,6 +13,19 @@ interface SessionHistory {
   selectedInterface: string;
 }
 
+interface ProcessRow {
+  root: HTMLDivElement;
+  memory: HTMLSpanElement;
+  cpu: HTMLSpanElement;
+  command: HTMLSpanElement;
+}
+
+interface DiskRow {
+  root: HTMLDivElement;
+  size: HTMLSpanElement;
+  bar: HTMLDivElement;
+}
+
 export class MetricsPanel {
   private sessionId?: string;
   private status?: DisplayStatus;
@@ -29,6 +42,8 @@ export class MetricsPanel {
   private networkAnimationFrame = 0;
   private displayedNetwork: NetworkHistory = { rx: [], tx: [] };
   private sessionVersion = 0;
+  private readonly processRows: ProcessRow[] = [];
+  private readonly diskRows = new Map<string, DiskRow>();
 
   constructor(private readonly api: Api, onError: (message: string) => void) {
     this.onError = onError;
@@ -253,26 +268,32 @@ export class MetricsPanel {
       const b = this.sortKey === 'cpu' ? right.cpuPercent : right.memoryBytes;
       return (a - b) * this.sortDirection;
     }).slice(0, 8);
-    element<HTMLButtonElement>('sort-cpu').textContent = `CPU ${this.sortKey === 'cpu' ? arrow(this.sortDirection) : ''}`;
-    element<HTMLButtonElement>('sort-memory').textContent = `内存 ${this.sortKey === 'memory' ? arrow(this.sortDirection) : ''}`;
+    setText(element<HTMLButtonElement>('sort-cpu'), `CPU ${this.sortKey === 'cpu' ? arrow(this.sortDirection) : ''}`);
+    setText(element<HTMLButtonElement>('sort-memory'), `内存 ${this.sortKey === 'memory' ? arrow(this.sortDirection) : ''}`);
     const list = element<HTMLDivElement>('process-list');
-    list.replaceChildren();
-    const maxMemory = Math.max(1, ...metrics.processes.map((process) => process.memoryBytes));
-    const maxCPU = Math.max(1, ...metrics.processes.map((process) => process.cpuPercent));
-    for (const process of processes) {
-      const row = document.createElement('div');
-      row.className = 'process-row';
-      const memory = document.createElement('span');
-      memory.textContent = formatSize(process.memoryBytes);
-      memory.style.background = barBackground(process.memoryBytes, maxMemory, '76, 141, 255');
-      const cpu = document.createElement('span');
-      cpu.textContent = process.cpuPercent.toFixed(1);
-      cpu.style.background = barBackground(process.cpuPercent, maxCPU, '63, 185, 80');
-      const command = document.createElement('span');
-      command.textContent = process.command;
-      command.title = `${process.pid} ${process.command}`;
-      row.append(memory, cpu, command);
-      list.append(row);
+    let maxMemory = 1;
+    let maxCPU = 1;
+    for (const process of metrics.processes) {
+      maxMemory = Math.max(maxMemory, process.memoryBytes);
+      maxCPU = Math.max(maxCPU, process.cpuPercent);
+    }
+    processes.forEach((process, index) => {
+      let row = this.processRows[index];
+      if (!row) {
+        row = createProcessRow();
+        this.processRows.push(row);
+      }
+      row.root.hidden = false;
+      setText(row.memory, formatSize(process.memoryBytes));
+      row.memory.style.background = barBackground(process.memoryBytes, maxMemory, '76, 141, 255');
+      setText(row.cpu, process.cpuPercent.toFixed(1));
+      row.cpu.style.background = barBackground(process.cpuPercent, maxCPU, '63, 185, 80');
+      setText(row.command, process.command);
+      row.command.title = `${process.pid} ${process.command}`;
+      if (list.children[index] !== row.root) list.insertBefore(row.root, list.children[index] ?? null);
+    });
+    for (let index = processes.length; index < this.processRows.length; index += 1) {
+      this.processRows[index]!.root.hidden = true;
     }
   }
 
@@ -308,25 +329,23 @@ export class MetricsPanel {
 
   private renderDisks(metrics: ResourceMetrics): void {
     const list = element<HTMLDivElement>('disk-list');
-    list.replaceChildren();
-    for (const disk of metrics.disks) {
-      const row = document.createElement('div');
-      row.className = 'disk-row';
-      const labels = document.createElement('div');
-      const path = document.createElement('span');
-      path.textContent = disk.path;
-      path.title = disk.path;
-      const size = document.createElement('span');
-      size.textContent = `${formatSize(disk.used)} / ${formatSize(disk.total)}`;
-      labels.append(path, size);
-      const meter = document.createElement('div');
-      meter.className = 'meter';
-      const bar = document.createElement('div');
-      bar.style.width = `${Math.min(100, Math.max(0, disk.usedPercent))}%`;
-      meter.append(bar);
-      row.append(labels, meter);
-      list.append(row);
+    const activePaths = new Set(metrics.disks.map((disk) => disk.path));
+    for (const [path, row] of this.diskRows) {
+      if (activePaths.has(path)) continue;
+      row.root.remove();
+      this.diskRows.delete(path);
     }
+    metrics.disks.forEach((disk, index) => {
+      let row = this.diskRows.get(disk.path);
+      if (!row) {
+        row = createDiskRow(disk.path);
+        this.diskRows.set(disk.path, row);
+      }
+      row.root.hidden = false;
+      setText(row.size, `${formatSize(disk.used)} / ${formatSize(disk.total)}`);
+      row.bar.style.width = `${Math.min(100, Math.max(0, disk.usedPercent))}%`;
+      if (list.children[index] !== row.root) list.insertBefore(row.root, list.children[index] ?? null);
+    });
   }
 
   private drawNetwork(): void {
@@ -389,16 +408,50 @@ export class MetricsPanel {
     element<HTMLSpanElement>('network-rates').textContent = '↑ — ↓ —';
     element<HTMLSpanElement>('ping-text').textContent = '— ms';
     element<HTMLSelectElement>('network-interface').replaceChildren();
-    element<HTMLDivElement>('process-list').replaceChildren();
-    element<HTMLDivElement>('disk-list').replaceChildren();
+    for (const row of this.processRows) row.root.hidden = true;
+    for (const row of this.diskRows.values()) row.root.remove();
+    this.diskRows.clear();
     if (element<HTMLDialogElement>('metrics-dialog').open) this.renderDialog();
     this.drawNetwork();
     this.drawPing();
   }
 }
 
+function createProcessRow(): ProcessRow {
+  const root = document.createElement('div');
+  root.className = 'process-row';
+  const memory = document.createElement('span');
+  const cpu = document.createElement('span');
+  const command = document.createElement('span');
+  root.append(memory, cpu, command);
+  return { root, memory, cpu, command };
+}
+
+function createDiskRow(path: string): DiskRow {
+  const root = document.createElement('div');
+  root.className = 'disk-row';
+  const labels = document.createElement('div');
+  const name = document.createElement('span');
+  name.textContent = path;
+  name.title = path;
+  const size = document.createElement('span');
+  labels.append(name, size);
+  const meter = document.createElement('div');
+  meter.className = 'meter';
+  const bar = document.createElement('div');
+  meter.append(bar);
+  root.append(labels, meter);
+  return { root, size, bar };
+}
+
+function setText(target: HTMLElement, value: string): void {
+  if (target.textContent !== value) target.textContent = value;
+}
+
 function setMeter(id: string, value: number): void {
-  element<HTMLDivElement>(id).style.width = `${Math.min(100, Math.max(0, value))}%`;
+  const bar = element<HTMLDivElement>(id);
+  const width = `${Math.min(100, Math.max(0, value))}%`;
+  if (bar.style.width !== width) bar.style.width = width;
 }
 
 function compactRate(value: number): string {

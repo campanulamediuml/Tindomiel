@@ -164,6 +164,11 @@ export class TerminalView {
   }
 
   private setStatus(status: DisplayStatus): void {
+    if (status === 'reconnecting' && this.status !== 'reconnecting') {
+      const buffer = this.terminal.buffer.active;
+      const currentLine = buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) ?? '';
+      if (buffer.cursorX > 0 || currentLine.length > 0) this.terminal.write('\r\n');
+    }
     this.status = status;
     this.session.status = status === 'detached' ? 'disconnected' : status;
     this.onStatus(status);

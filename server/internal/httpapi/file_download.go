@@ -25,7 +25,6 @@ func (s *Server) sftpDownloadFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer client.Close()
 	remotePath, err := client.RealPath(request.Path)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "SFTP_REALPATH_FAILED", err.Error())

@@ -71,14 +71,29 @@ func (s *Store) List(ctx context.Context) ([]Profile, error) {
 }
 
 func (s *Store) Get(ctx context.Context, id string) (Profile, error) {
-	profiles, err := s.List(ctx)
-	if err != nil {
-		return Profile{}, err
-	}
-	for _, profile := range profiles {
-		if profile.ID == id {
-			return profile, nil
+	if strings.HasPrefix(id, "custom:") {
+		profiles, err := s.loadCustom()
+		if err != nil {
+			return Profile{}, err
 		}
+		for _, profile := range profiles {
+			if profile.ID == id {
+				return profile, nil
+			}
+		}
+		return Profile{}, errors.New("profile not found")
+	}
+	if alias, ok := strings.CutPrefix(id, "openssh:"); ok && alias != "" {
+		preferences, err := s.readPreferences()
+		if err != nil {
+			return Profile{}, err
+		}
+		for _, hidden := range preferences.HiddenProfiles {
+			if hidden == id {
+				return Profile{}, errors.New("profile not found")
+			}
+		}
+		return resolveOpenSSH(ctx, alias)
 	}
 	return Profile{}, errors.New("profile not found")
 }
@@ -228,13 +243,32 @@ func loadOpenSSH(ctx context.Context) ([]Profile, error) {
 		return nil, err
 	}
 
+	resolved := make([]*Profile, len(aliases))
+	workers := min(4, len(aliases))
+	jobs := make(chan int)
+	var workersWG sync.WaitGroup
+	workersWG.Add(workers)
+	for range workers {
+		go func() {
+			defer workersWG.Done()
+			for index := range jobs {
+				profile, err := resolveOpenSSH(ctx, aliases[index])
+				if err == nil {
+					resolved[index] = &profile
+				}
+			}
+		}()
+	}
+	for index := range aliases {
+		jobs <- index
+	}
+	close(jobs)
+	workersWG.Wait()
 	profiles := make([]Profile, 0, len(aliases))
-	for _, alias := range aliases {
-		profile, err := resolveOpenSSH(ctx, alias)
-		if err != nil {
-			continue
+	for _, profile := range resolved {
+		if profile != nil {
+			profiles = append(profiles, *profile)
 		}
-		profiles = append(profiles, profile)
 	}
 	return profiles, nil
 }

@@ -11,6 +11,14 @@ type osc7Parser struct {
 }
 
 func (p *osc7Parser) feed(data []byte) ([]byte, string, bool) {
+	if len(p.buffer) == 0 && !bytes.Contains(data, osc7Prefix) {
+		keep := suffixPrefixLength(data, osc7Prefix)
+		if keep == 0 {
+			return data, "", false
+		}
+		p.buffer = append(p.buffer, data[len(data)-keep:]...)
+		return data[:len(data)-keep], "", false
+	}
 	p.buffer = append(p.buffer, data...)
 	output := make([]byte, 0, len(data))
 	var cwd string

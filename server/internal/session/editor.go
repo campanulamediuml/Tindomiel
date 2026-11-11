@@ -54,15 +54,10 @@ func (m *editorManager) open(remotePath, application string) (string, error) {
 	}
 	m.mu.Unlock()
 
-	client, err := m.session.Client()
+	remote, err := m.session.SFTPClient()
 	if err != nil {
 		return "", err
 	}
-	remote, err := sftp.NewClient(client)
-	if err != nil {
-		return "", err
-	}
-	defer remote.Close()
 	source, err := remote.Open(remotePath)
 	if err != nil {
 		return "", err
@@ -149,17 +144,11 @@ func (m *editorManager) upload(file *watchedFile) {
 		return
 	}
 	defer local.Close()
-	client, err := m.session.Client()
+	remote, err := m.session.SFTPClient()
 	if err != nil {
 		m.notifySaveError(file.remotePath, err)
 		return
 	}
-	remote, err := sftp.NewClient(client)
-	if err != nil {
-		m.notifySaveError(file.remotePath, err)
-		return
-	}
-	defer remote.Close()
 	target, err := remote.OpenFile(file.remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		m.notifySaveError(file.remotePath, err)

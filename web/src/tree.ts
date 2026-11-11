@@ -25,6 +25,10 @@ export class RemoteTree {
     element<HTMLButtonElement>('tree-refresh').addEventListener('click', () => void this.refresh());
   }
 
+  removeSession(sessionId: string): void {
+    this.snapshots.delete(sessionId);
+  }
+
   async setSession(sessionId?: string): Promise<void> {
     if (this.sessionId) this.snapshots.set(this.sessionId, { expanded: this.expanded, nodes: this.nodes, currentPath: this.currentPath });
     this.sessionId = sessionId;
@@ -43,6 +47,13 @@ export class RemoteTree {
     this.container.replaceChildren();
     if (sessionId) await this.load('/');
     this.render();
+  }
+
+  setDirectory(path: string, entries: FileEntry[]): void {
+    const node = this.nodes.get(path) ?? { loading: false };
+    node.children = entries.filter((entry) => entry.type === 'directory');
+    node.loading = false;
+    this.nodes.set(path, node);
   }
 
   setCurrent(path: string): void {

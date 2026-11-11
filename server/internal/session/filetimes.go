@@ -18,13 +18,32 @@ func (s *Session) FileCreationTimes(remotePaths []string) (map[string]int64, err
 	if err != nil {
 		return nil, err
 	}
-	windows := bytes.Contains(client.Conn.ServerVersion(), []byte("OpenSSH_for_Windows"))
-	darwin := false
-	if !windows {
+	s.fileTimesMu.RLock()
+	osName := s.fileTimesOS
+	s.fileTimesMu.RUnlock()
+	windows := osName == "windows" || (osName == "" && bytes.Contains(client.Conn.ServerVersion(), []byte("OpenSSH_for_Windows")))
+	darwin := osName == "darwin"
+	if osName == "" && !windows {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		output, unameErr := s.exec(ctx, "uname -s")
 		cancel()
-		darwin = unameErr == nil && bytes.Contains(bytes.ToLower(output), []byte("darwin"))
+		system := bytes.ToLower(output)
+		darwin = unameErr == nil && bytes.Contains(system, []byte("darwin"))
+		if unameErr == nil {
+			switch {
+			case darwin:
+				osName = "darwin"
+			case bytes.Contains(system, []byte("linux")):
+				osName = "linux"
+			}
+			if osName != "" {
+				s.fileTimesMu.Lock()
+				if s.fileTimesOS == "" {
+					s.fileTimesOS = osName
+				}
+				s.fileTimesMu.Unlock()
+			}
+		}
 	}
 	for start := 0; start < len(remotePaths); start += 50 {
 		end := min(start+50, len(remotePaths))

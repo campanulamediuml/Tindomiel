@@ -18,7 +18,6 @@ func (s *Server) sftpRealpath(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer client.Close()
 	resolved, err := client.RealPath(requestedPath(r))
 	if err != nil {
 		slog.Warn("sftp_realpath_failed", "path", requestedPath(r), "error", err)

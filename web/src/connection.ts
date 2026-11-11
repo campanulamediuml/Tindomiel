@@ -327,9 +327,13 @@ export class ConnectionManager {
         : await this.api.createProfile(profile);
       this.editingId = undefined;
       this.editor.close();
-      await this.reload();
-      if (connectAfter) this.connect(created);
-      else this.onError(`已保存连接 ${created.name}`);
+      if (connectAfter) {
+        this.connect(created);
+        void this.reload();
+      } else {
+        await this.reload();
+        this.onError(`已保存连接 ${created.name}`);
+      }
     } catch (error) {
       this.onError(messageOf(error));
     }

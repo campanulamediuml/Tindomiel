@@ -38,7 +38,6 @@ func (s *Server) sftpDownloadDirectory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	defer client.Close()
 
 	remotePath, err := client.RealPath(request.Path)
 	if err != nil {
