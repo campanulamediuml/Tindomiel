@@ -78,7 +78,7 @@ async function terminalReconnectCheck(): Promise<{ startsAtZero: boolean; breaks
   Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
   const session: SessionInfo = { sessionId: 'benchmark', profileId: 'benchmark', status: 'ready', openedAt: 0 };
   const api = { terminalUrl: async () => 'ws://127.0.0.1/benchmark' };
-  const view = new TerminalView(session, api as never, () => undefined, () => undefined, () => undefined, () => undefined, () => undefined);
+  const view = new TerminalView(session, api as never, () => undefined, () => undefined, () => undefined, () => undefined, () => undefined, { theme: 'homebrew', fontSize: 13, cursorBlink: true, scrollback: 10_000, downloadDirectory: '', shortcuts: [] });
   document.getElementById('terminal-area')?.append(view.element);
   view.status = 'disconnected';
   await view.connect();

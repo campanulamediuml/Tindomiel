@@ -8,7 +8,7 @@
 
 ```bash
 cd server && go test ./... && go vet ./... && go build ./...
-cd .. && npm run build:web
+cd .. && npm --prefix web test && npm run build:web
 npm run tauri:build
 git diff --check
 ```
@@ -103,6 +103,35 @@ git diff --check
 2. 查看至少三轮资源快照。
 
 预期：PowerShell/CIM 采集正常；进程、网卡、磁盘完整，不出现 ConPTY 长行乱码。若远端拒绝 SFTP subsystem，文件区域显示“远端未启用或无法提供 SFTP”，而不是普通目录读取失败。
+
+### TAB-02：复制标签页
+
+1. 右键一个已连接标签，点击“复制标签页”。
+2. 检查新标签紧挨原标签插入右侧，名称和连接配置一致。
+3. 在两个标签分别执行命令，确认后端存在两个不同的 `sessionId`，远程 Shell 互不影响。
+
+### SHORTCUT-01：全局与 Session 快捷键隔离
+
+1. 在应用设置中添加多组组合 A → B 并保存，重新打开确认持久化。
+2. 新建两个 Session，确认两者都复制当前全局映射。
+3. 在第一个 Session 的“会话设置”中删除或修改映射并保存，确认第二个 Session 和全局配置不变。
+4. 修改全局映射，确认两个已有 Session 均不自动变化；再新建 Session，确认它复制新全局值。
+5. 在第一个 Session 点击“同步全局配置”并保存，确认仅该 Session 被当前全局值覆盖，第二个 Session 仍保持自己的配置。
+6. 在终端按下 A，确认不会发送 A 本身，而是把 B 对应的控制字节或转义序列发送给 Shell；重连后 Session 自己的映射保持。
+7. 覆盖 Ctrl、Alt、Shift、方向键、编辑键和 F1–F12，验证浏览器默认行为不会重复触发。
+
+### SETTINGS-01：应用菜单与设置持久化
+
+1. 分别从 macOS 的 Tindomiel 应用菜单点击“设置…”、按 `Cmd+,`、点击左侧资源栏底部齿轮，确认都打开同一设置页；资源列表滚动时齿轮保持固定在左下角。
+2. 依次切换 Homebrew、ClearDark、Boring 并保存，确认已打开的终端立即应用对应色板；新建 Session 使用同一主题，修改字号、回滚行数和光标闪烁也立即生效。
+3. 重新打开设置页并重启应用，确认主题及其他设置保持；检查下载目录仍与工具栏一致。旧版缺少主题字段时应使用 Homebrew。
+4. 验证非法主题、字号、回滚行数和相对下载路径会被后端拒绝，旧版缺少终端字段的偏好使用默认值。
+
+### APP-METRICS-01：全应用资源占用
+
+1. 查看左侧齿轮右侧，确认每 3 秒显示 CPU、内存及悬停进程数，数值包含主进程、Go 后端和 WebKit，而不是只统计 Web Content。
+2. 对照 Activity Monitor 中 Tindomiel 各进程，确认没有混入其他应用的 WebKit 进程；CPU 为多核合计口径，内存为 physical footprint 合计。
+3. 终端空闲、持续输出和 SFTP 传输时分别观察数值变化，确认采样不会重叠请求，页面隐藏时暂停。
 
 ### PASTE-01：终端 Cmd+V
 

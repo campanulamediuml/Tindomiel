@@ -25,7 +25,8 @@ GET /api/profiles
     "name": "socat-248",
     "source": "openssh" | "custom",
     "options": { "host": "192.168.31.248", "port": 22, "user": "socat",
-                 "auth": "publicKey", "privateKeys": ["~/.ssh/id_ed25519"] }
+                 "auth": "publicKey", "privateKeys": ["~/.ssh/id_ed25519"],
+                 "shortcuts": [{ "from": "Ctrl+Shift+P", "to": "Ctrl+A" }] }
   }]
 
 POST /api/profiles        # 新建 custom profile（body 同上单条结构）
@@ -58,6 +59,23 @@ POST /api/local/choose-download-directory  # macOS 原生目录选择器
 ```
 
 下载目录保存在 `preferences.json` 的 `downloadDirectory`，重启服务后仍有效。未选择时默认为 `~/Downloads`；`TINDOMIEL_DOWNLOADS` 可强制覆盖偏好，主要用于开发测试。取消选择返回 `DIRECTORY_SELECTION_CANCELLED`，不改变原目录。
+
+### 应用设置
+
+```
+GET /api/settings
+→ { "theme": "homebrew", "fontSize": 13, "cursorBlink": true, "scrollback": 10000,
+    "downloadDirectory": "/Users/me/Downloads",
+    "shortcuts": [{ "from": "Ctrl+Shift+P", "to": "Ctrl+A" }] }
+
+PUT /api/settings
+  body: 同上完整结构
+→ 保存后的完整设置
+```
+
+`theme` 可取 `homebrew`、`clearDark` 或 `boring`，默认为 Homebrew；旧客户端保存时省略该字段也会使用默认值。字号范围为 10–24，回滚行数范围为 1000–50000，下载目录必须是绝对路径。默认值为 13px、光标闪烁、10000 行和空快捷键数组；旧版偏好缺少字段时自动使用默认值。最多保存 128 组映射，`from` 和 `to` 均不能为空。设置与下载目录、默认打开应用和隐藏连接共用 `preferences.json`，更新时保留其他字段。
+
+全局 `shortcuts` 只作为新 Session 的创建模板。Session 内的映射由前端独立保存，不通过此接口回写；已有 Session 不会因 PUT 全局设置而自动改变。旧 profile 的 `options.shortcuts` 字段仍为配置兼容保留，但不再作为新 Session 的快捷键来源。
 
 接口只返回私钥路径和元信息，不返回私钥内容。OpenSSH profile 的生效配置由后端通过 `ssh -G <别名>` 解析，前端不自行展开 OpenSSH 指令。
 

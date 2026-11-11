@@ -61,6 +61,8 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/local/download-path", s.defaultDownloadPath)
 	api.HandleFunc("POST /api/local/open-downloads", s.openDownloadDirectory)
 	api.HandleFunc("POST /api/local/choose-download-directory", s.chooseDownloadDirectory)
+	api.HandleFunc("GET /api/settings", s.getSettings)
+	api.HandleFunc("PUT /api/settings", s.updateSettings)
 	api.HandleFunc("GET /api/profiles", s.listProfiles)
 	api.HandleFunc("POST /api/profiles", s.createProfile)
 	api.HandleFunc("PUT /api/profiles/{id}", s.updateProfile)

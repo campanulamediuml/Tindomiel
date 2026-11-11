@@ -36,6 +36,7 @@
       <main id="workspace" class="workspace">
         <div class="top-workspace">
           <aside id="metrics-panel">
+            <div id="metrics-content">
             <div class="target-ip"><strong id="target-ip">IP —</strong><button id="copy-ip" class="link-button">复制</button></div>
             <button id="system-info-button" class="panel-title" type="button">系统信息</button>
             <div id="system-uptime" class="metric-line">运行 —</div>
@@ -58,6 +59,13 @@
             <canvas id="ping-chart" height="48"></canvas>
             <div class="disk-header"><span>路径</span><span>已用/总大小</span></div>
             <div id="disk-list"></div>
+            </div>
+            <div class="settings-footer">
+              <button id="settings-gear" type="button" title="设置" aria-label="打开设置">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/></svg>
+              </button>
+              <output id="app-resource-usage" hidden>CPU — · 内存 —</output>
+            </div>
           </aside>
           <section id="terminal-area">
             <div id="welcome">
@@ -135,7 +143,7 @@
 
     <dialog id="profile-editor-dialog">
       <form method="dialog" class="dialog-header">
-        <h2 id="profile-editor-title">新建连接</h2>
+        <h2 id="profile-editor-title">编辑连接</h2>
         <button value="cancel" aria-label="关闭">×</button>
       </form>
       <form id="profile-form">
@@ -161,6 +169,59 @@
         <div class="form-actions">
           <button id="save-profile" type="button">保存</button>
           <button type="submit" class="primary">保存并连接</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="settings-dialog" class="settings-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2>设置</h2>
+        <button value="cancel" aria-label="关闭">×</button>
+      </form>
+      <form id="settings-form">
+        <fieldset>
+          <legend>终端</legend>
+          <label>配色方案<select name="theme" id="settings-theme"><option value="homebrew">Homebrew（黑绿，默认）</option><option value="clearDark">ClearDark</option><option value="boring">Boring</option></select></label>
+          <div class="form-row settings-number-row">
+            <label>字号<input name="fontSize" type="number" min="10" max="24" required /></label>
+            <label>回滚行数<input name="scrollback" type="number" min="1000" max="50000" step="1000" required /></label>
+          </div>
+          <label class="settings-checkbox"><input name="cursorBlink" type="checkbox" />光标闪烁</label>
+          <p class="settings-hint">减少回滚行数可降低内存占用，关闭光标闪烁可减少空闲时的终端绘制。</p>
+        </fieldset>
+        <fieldset>
+          <legend>全局快捷键映射</legend>
+          <p class="settings-hint">新 Session 创建时复制此配置；之后的全局修改不会自动影响已有 Session。</p>
+          <div class="shortcut-header"><span>组合 A</span><span>映射为 B（发送到 Shell）</span><span></span></div>
+          <div id="settings-shortcut-list" class="shortcut-list"></div>
+          <button id="settings-add-shortcut" class="link-button add-shortcut" type="button">＋ 添加快捷键</button>
+        </fieldset>
+        <fieldset>
+          <legend>文件下载</legend>
+          <label>下载目录</label>
+          <div class="settings-path-row">
+            <input name="downloadDirectory" readonly required aria-label="下载目录" />
+            <button id="settings-choose-download" type="button">选择…</button>
+          </div>
+        </fieldset>
+        <div class="form-actions"><button type="submit" class="primary">保存设置</button></div>
+      </form>
+    </dialog>
+    <dialog id="session-settings-dialog" class="settings-dialog">
+      <form method="dialog" class="dialog-header">
+        <h2 id="session-settings-title">会话设置</h2>
+        <button value="cancel" aria-label="关闭">×</button>
+      </form>
+      <form id="session-settings-form">
+        <fieldset>
+          <legend>Session 快捷键映射</legend>
+          <p class="settings-hint">此配置仅在当前 Session 内有效。同步全局配置会替换下方编辑内容，点击保存后生效。</p>
+          <div class="shortcut-header"><span>组合 A</span><span>映射为 B（发送到 Shell）</span><span></span></div>
+          <div id="session-shortcut-list" class="shortcut-list"></div>
+          <button id="session-add-shortcut" class="link-button add-shortcut" type="button">＋ 添加快捷键</button>
+        </fieldset>
+        <div class="form-actions session-settings-actions">
+          <button id="session-sync-shortcuts" type="button">同步全局配置</button>
+          <button type="submit" class="primary">保存</button>
         </div>
       </form>
     </dialog>
@@ -211,6 +272,8 @@
       <button id="context-open-with">选择应用打开…</button>
     </div>
     <div id="tab-context-menu" hidden>
+      <button id="tab-duplicate">复制标签页</button>
+      <button id="tab-settings">会话设置</button>
       <button id="tab-reconnect">重连</button>
     </div>
     <div id="toast" role="status"></div>

@@ -1,12 +1,30 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_metrics;
+
+use app_metrics::{AppMetrics, AppMetricsState};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use tauri::{Manager, RunEvent, State, WebviewWindowBuilder};
+use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindowBuilder};
+
+const OPEN_SETTINGS_EVENT: &str = "open-settings";
+
+fn application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    if cfg!(target_os = "macos") {
+        let settings =
+            MenuItem::with_id(app, OPEN_SETTINGS_EVENT, "设置…", true, Some("CmdOrCtrl+,"))?;
+        if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() {
+            app_menu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], 2)?;
+        }
+    }
+    Ok(menu)
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 struct BackendInfo {
@@ -24,8 +42,23 @@ fn get_backend_info(state: State<'_, BackendState>) -> BackendInfo {
     state.info.clone()
 }
 
+#[tauri::command]
+fn get_app_metrics(state: State<'_, AppMetricsState>) -> Result<AppMetrics, String> {
+    state.sample()
+}
+
 fn main() {
     let app = tauri::Builder::default()
+        .menu(application_menu)
+        .on_menu_event(|app, event| {
+            if event.id() == OPEN_SETTINGS_EVENT {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                let _ = app.emit(OPEN_SETTINGS_EVENT, ());
+            }
+        })
         .setup(|app| {
             let state = start_backend(app)?;
             let mut config = app
@@ -39,11 +72,12 @@ fn main() {
                 config.height =
                     (f64::from(monitor.size().height) / monitor.scale_factor() * 0.9).round();
             }
+            app.manage(AppMetricsState::default());
             WebviewWindowBuilder::from_config(app, &config)?.build()?;
             app.manage(state);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_backend_info])
+        .invoke_handler(tauri::generate_handler![get_backend_info, get_app_metrics])
         .build(tauri::generate_context!())
         .expect("failed to build Tindomiel");
 

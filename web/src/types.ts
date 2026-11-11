@@ -2,6 +2,22 @@ export type SessionStatus = 'connecting' | 'ready' | 'disconnected' | 'reconnect
 export type DisplayStatus = SessionStatus | 'detached';
 export type AuthMethod = 'publicKey' | 'password';
 
+export interface ShortcutMapping {
+  from: string;
+  to: string;
+}
+
+export type TerminalTheme = 'homebrew' | 'clearDark' | 'boring';
+
+export interface AppSettings {
+  theme: TerminalTheme;
+  fontSize: number;
+  cursorBlink: boolean;
+  scrollback: number;
+  downloadDirectory: string;
+  shortcuts: ShortcutMapping[];
+}
+
 export interface ProfileOptions {
   host: string;
   port: number;
@@ -10,6 +26,7 @@ export interface ProfileOptions {
   password?: string;
   privateKeys: string[];
   privateKeyPassphrase?: string;
+  shortcuts?: ShortcutMapping[];
 }
 
 export interface Profile {

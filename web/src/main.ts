@@ -1,13 +1,17 @@
 import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { Api } from './api';
+import { startAppMetrics } from './app-metrics';
 import { ConnectionManager } from './connection';
 import { CustomSelect } from './custom-select';
 import { LogCenter, recordFrontendLog } from './logs';
 import { setupResizing } from './resize';
+import { SettingsManager } from './settings';
+import { SessionSettingsManager } from './session-settings';
 import { MetricsPanel } from './metrics';
 import { SftpPanel } from './sftp';
 import { TerminalView } from './terminal';
+import { terminalThemes } from './terminal-themes';
 import { TransferCenter } from './transfer';
 import { ApiError, type DisplayStatus, type HostKeyDetails, type Profile, type SessionInfo } from './types';
 import { element, messageOf } from './utils';
@@ -30,6 +34,8 @@ let metrics: MetricsPanel;
 let sftp: SftpPanel;
 let transfers: TransferCenter;
 let apiClient: Api;
+let appSettings: SettingsManager;
+let sessionSettings: SessionSettingsManager;
 let toastTimer = 0;
 
 const tabsElement = element<HTMLDivElement>('tabs');
@@ -42,12 +48,19 @@ async function start(): Promise<void> {
   try {
     const api = await Api.create();
     apiClient = api;
-    for (const id of ['network-interface', 'auth-method', 'profile-folder']) {
+    appSettings = new SettingsManager(api, applySettings, updateDownloadPath, showToast);
+    sessionSettings = new SessionSettingsManager(() => appSettings.current.shortcuts, showToast);
+    await appSettings.load();
+    if ('__TAURI_INTERNALS__' in window) {
+      const { listen } = await import('@tauri-apps/api/event');
+      await listen('open-settings', () => appSettings.open());
+      void startAppMetrics();
+    }
+    for (const id of ['network-interface', 'auth-method', 'profile-folder', 'settings-theme']) {
       new CustomSelect(element<HTMLSelectElement>(id));
     }
     transfers = new TransferCenter();
     new LogCenter(api);
-    void api.defaultDownloadPath().then(({ path }) => updateDownloadPath(path)).catch((error) => showToast(messageOf(error)));
     metrics = new MetricsPanel(api, showToast);
     sftp = new SftpPanel(api, transfers, showToast);
     connections = new ConnectionManager(api, (profile) => void connect(profile), showToast);
@@ -58,13 +71,20 @@ async function start(): Promise<void> {
 }
 
 function updateDownloadPath(path: string): void {
+  appSettings.current.downloadDirectory = path;
   const label = element<HTMLButtonElement>('download-path');
   label.textContent = `下载：${path}`;
   label.title = `在 Finder 中打开：${path}`;
 }
 
+function applySettings(settings: import('./types').AppSettings): void {
+  terminalArea.style.background = terminalThemes[settings.theme].background ?? '';
+  for (const tab of tabs.values()) tab.terminal.applySettings(settings);
+}
+
 function bindEvents(): void {
   document.addEventListener('contextmenu', (event) => event.preventDefault());
+  document.addEventListener('keydown', handleSettingsShortcut, true);
   document.addEventListener('keydown', handleTerminalPasteShortcut, true);
   document.addEventListener('paste', handleTerminalPaste, true);
   document.addEventListener('scroll', () => {
@@ -75,6 +95,17 @@ function bindEvents(): void {
   setupResizing();
   const tabMenu = element<HTMLDivElement>('tab-context-menu');
   document.addEventListener('click', () => { tabMenu.hidden = true; });
+  element<HTMLButtonElement>('tab-duplicate').addEventListener('click', () => {
+    const tab = tabs.get(tabContextId);
+    const insertAfter = tabContextId;
+    tabMenu.hidden = true;
+    if (tab) void connect(tab.profile, insertAfter);
+  });
+  element<HTMLButtonElement>('tab-settings').addEventListener('click', () => {
+    const tab = tabs.get(tabContextId);
+    tabMenu.hidden = true;
+    if (tab) sessionSettings.open(tab.profile.name, tab.terminal);
+  });
   element<HTMLButtonElement>('tab-reconnect').addEventListener('click', () => {
     const tab = tabs.get(tabContextId);
     tabMenu.hidden = true;
@@ -117,6 +148,7 @@ function bindEvents(): void {
   reconnectButton.addEventListener('click', () => {
     void activeTerminal()?.reconnect().catch((error) => showToast(messageOf(error)));
   });
+  element<HTMLButtonElement>('settings-gear').addEventListener('click', () => appSettings.open());
   element<HTMLButtonElement>('download-path').addEventListener('click', () => {
     void apiClient.openDownloadDirectory().catch((error) => showToast(messageOf(error)));
   });
@@ -129,8 +161,16 @@ function bindEvents(): void {
   });
 }
 
+function handleSettingsShortcut(event: KeyboardEvent): void {
+  if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key !== ',') return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  appSettings.open();
+}
+
 function handleTerminalPasteShortcut(event: KeyboardEvent): void {
   if (!event.metaKey || event.ctrlKey || event.altKey || event.key.toLowerCase() !== 'v' || !isTerminalPasteTarget(event)) return;
+  if (activeTerminal()?.handlesShortcut(event)) return;
   event.stopImmediatePropagation();
 }
 
@@ -207,7 +247,7 @@ function localProfile(): Profile {
   };
 }
 
-async function connect(profile: Profile): Promise<void> {
+async function connect(profile: Profile, insertAfter?: string): Promise<void> {
   const api = apiClient;
   const session: SessionInfo = {
     sessionId: `pending-${crypto.randomUUID()}`,
@@ -225,9 +265,11 @@ async function connect(profile: Profile): Promise<void> {
     (path) => {
       if (activeId === session.sessionId) void sftp.load(path).catch((error) => showToast(messageOf(error)));
     },
+    appSettings.current,
+    appSettings.current.shortcuts,
   );
   const tab: Tab = { profile, terminal, status: 'connecting', pending: true, cancelled: false };
-  tabs.set(session.sessionId, tab);
+  insertTab(session.sessionId, tab, insertAfter);
   terminalArea.append(terminal.element);
   terminal.terminal.write(`正在连接 ${profile.name}…\r\n`);
   renderTabs();
@@ -239,10 +281,9 @@ async function connect(profile: Profile): Promise<void> {
       void api.deleteSession(created.sessionId).catch(() => undefined);
       return;
     }
-    tabs.delete(pendingId);
     Object.assign(session, created);
     tab.pending = false;
-    tabs.set(session.sessionId, tab);
+    rekeyTab(pendingId, session.sessionId);
     if (activeId === pendingId) {
       activeId = session.sessionId;
       renderTabs();
@@ -262,6 +303,24 @@ async function connect(profile: Profile): Promise<void> {
     if (activeId === pendingId) updateToolbar('error');
     showToast(messageOf(error));
   }
+}
+
+function insertTab(sessionId: string, tab: Tab, insertAfter?: string): void {
+  if (!insertAfter || !tabs.has(insertAfter)) {
+    tabs.set(sessionId, tab);
+    return;
+  }
+  const entries = Array.from(tabs.entries());
+  const index = entries.findIndex(([id]) => id === insertAfter);
+  entries.splice(index + 1, 0, [sessionId, tab]);
+  tabs.clear();
+  for (const [id, entry] of entries) tabs.set(id, entry);
+}
+
+function rekeyTab(previousId: string, sessionId: string): void {
+  const entries = Array.from(tabs.entries(), ([id, tab]) => id === previousId ? [sessionId, tab] as const : [id, tab] as const);
+  tabs.clear();
+  for (const [id, tab] of entries) tabs.set(id, tab);
 }
 
 async function createSession(api: Api, profileId: string) {
@@ -425,7 +484,7 @@ function renderTabs(): void {
       const reconnect = element<HTMLButtonElement>('tab-reconnect');
       reconnect.disabled = tab.pending ? tab.status !== 'error' : tab.status !== 'disconnected' && tab.status !== 'detached';
       menu.style.left = `${Math.min(event.clientX, window.innerWidth - 190)}px`;
-      menu.style.top = `${Math.min(event.clientY, window.innerHeight - 60)}px`;
+      menu.style.top = `${Math.min(event.clientY, window.innerHeight - 140)}px`;
       menu.hidden = false;
     });
     button.addEventListener('keydown', (event) => {

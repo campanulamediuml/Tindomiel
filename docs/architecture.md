@@ -17,13 +17,17 @@ Tauri / 系统 WebView（TypeScript + xterm.js）
 远程 SSH 服务器
 ```
 
-Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访问 token。前端只加载本地静态资源，不直接持有私钥，也不直接发起 SSH 连接。
+Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访问 token。macOS 应用菜单包含“设置…”和 `Cmd+,`，通过 Tauri 事件打开前端设置页。前端只加载本地静态资源，不直接持有私钥，也不直接发起 SSH 连接。
+
+原生 `app_metrics` 模块通过 PID 责任归属汇总主进程、Go sidecar 和 WebKit 辅助进程；普通 PPID 无法关联 launchd 名下的 WebKit 进程，因此使用 macOS responsibility 接口确认归属，再读取 `proc_pid_rusage`。前端每 3 秒调用一次 Tauri 命令，CPU 按相邻采样的累计 CPU 时间差计算，内存汇总 physical footprint，页面隐藏时暂停请求。
+
+应用设置通过 `GET/PUT /api/settings` 持久化到 `preferences.json`；终端主题、字号、光标闪烁和回滚行数保存后立即更新所有 xterm 实例，下载目录沿用同一偏好存储。主题定义集中在前端 `terminal-themes.ts`，包含默认 Homebrew、macOS ClearDark 和原自定义 Boring；主题切换只更新渲染色板，不改变终端数据流。全局快捷键采用复制语义：每个 TerminalView 创建时从全局数组建立自己的 Map，后续全局保存不修改该 Map；Session 设置只更新当前 TerminalView，“同步全局配置”是显式覆盖当前 Session 编辑内容的操作。Session 快捷键只存于内存，重连保留，关闭标签释放。
 
 ## 模块职责
 
 ### 前端（web/）
 
-- **TerminalView**：xterm.js 渲染、键盘输入、选择复制、bracketed paste、resize 上报
+- **TerminalView**：xterm.js 渲染、键盘输入、创建时复制且可独立修改的 Session 快捷键映射、选择复制、bracketed paste、resize 上报
 - **TabManager**：每个标签页持有一个独立 `sessionId` 和 xterm 实例；切换标签只隐藏视图，不销毁终端
 - **ProfileList**：连接列表展示（含 OpenSSH config 导入的分组）
 - **SftpPanel**：远程目录树、拖拽上传、下载、进度条

@@ -1,11 +1,12 @@
 import type { Api } from './api';
-import type { AuthMethod, Folder, KeyInfo, Profile } from './types';
+import type { AuthMethod, Folder, KeyInfo, Profile, ShortcutMapping } from './types';
 import { element, messageOf } from './utils';
 
 export class ConnectionManager {
   private profiles: Profile[] = [];
   private folders: Folder[] = [];
   private keys: KeyInfo[] = [];
+  private shortcuts: ShortcutMapping[] = [];
   private editingId?: string;
   private contextProfile?: Profile;
   private contextFolder = '';
@@ -51,9 +52,10 @@ export class ConnectionManager {
 
   async newProfile(folderId = ''): Promise<void> {
     this.editingId = undefined;
-    element<HTMLHeadingElement>('profile-editor-title').textContent = '新建连接';
+    element<HTMLHeadingElement>('profile-editor-title').textContent = '编辑连接';
     this.form.reset();
     this.keys = [];
+    this.shortcuts = [];
     this.renderKeys('正在载入默认私钥…');
     await this.loadFolders();
     this.populateFolders();
@@ -83,10 +85,7 @@ export class ConnectionManager {
     setFormValue(this.form, 'folder', profile.folder);
     setFormValue(this.form, 'auth', profile.options.auth);
     setFormValue(this.form, 'user', profile.options.user);
-    const password = this.form.elements.namedItem('password') as HTMLInputElement;
-    password.placeholder = '留空则保留原密码';
-    const passphrase = this.form.elements.namedItem('privateKeyPassphrase') as HTMLInputElement;
-    passphrase.placeholder = '留空则保留原私钥短语';
+    this.shortcuts = (profile.options.shortcuts ?? []).map((shortcut) => ({ ...shortcut }));
     this.keys = await Promise.all(profile.options.privateKeys.map(async (path) => {
       try {
         return await this.api.inspectKey(path);
@@ -319,6 +318,7 @@ export class ConnectionManager {
         password: auth === 'password' ? String(data.get('password') ?? '') : '',
         privateKeys: auth === 'publicKey' ? this.keys.map((key) => key.path) : [],
         privateKeyPassphrase: auth === 'publicKey' ? String(data.get('privateKeyPassphrase') ?? '') : '',
+        shortcuts: this.shortcuts.filter((shortcut) => shortcut.from && shortcut.to).map((shortcut) => ({ ...shortcut })),
       },
     };
     try {

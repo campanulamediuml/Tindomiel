@@ -1,0 +1,47 @@
+import type { ITheme } from '@xterm/xterm';
+import type { TerminalTheme } from './types';
+
+export const terminalThemes: Record<TerminalTheme, ITheme> = {
+  homebrew: {
+    background: '#000000',
+    foreground: '#28FE14',
+    cursor: '#38FE27',
+    selectionBackground: 'rgba(9,0,233,0.65)',
+    green: '#28FE14',
+    brightGreen: '#28FE14',
+  },
+  clearDark: {
+    background: '#191D27',
+    foreground: '#E0E0E0',
+    cursor: '#E0E0E0',
+    selectionBackground: '#273D4C',
+    black: '#35424C',
+    red: '#B45648',
+    green: '#6CAA71',
+    yellow: '#C4AC62',
+    blue: '#6D96B4',
+    magenta: '#BD7BCD',
+    cyan: '#7CCBCD',
+    white: '#DEE5EB',
+    brightBlack: '#465C6D',
+    brightRed: '#DF6C5A',
+    brightGreen: '#79BE7E',
+    brightYellow: '#E5C872',
+    brightBlue: '#67B5ED',
+    brightMagenta: '#D389E5',
+    brightCyan: '#84DDE0',
+    brightWhite: '#E5EFF5',
+  },
+  boring: {
+    background: '#0B0E12',
+    foreground: '#D7DCE2',
+    cursor: '#4C8DFF',
+    selectionBackground: 'rgba(76,141,255,0.25)',
+    red: '#FF7B72',
+    green: '#7EE787',
+    yellow: '#F2CC60',
+    blue: '#79C0FF',
+    magenta: '#D2A8FF',
+    cyan: '#76E3EA',
+  },
+};

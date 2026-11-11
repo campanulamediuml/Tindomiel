@@ -1,4 +1,4 @@
-import { ApiError, type FileEntry, type Folder, type KeyInfo, type Profile, type ResourceMetrics, type SessionInfo } from './types';
+import { ApiError, type AppSettings, type FileEntry, type Folder, type KeyInfo, type Profile, type ResourceMetrics, type SessionInfo } from './types';
 
 interface BackendInfo {
   url: string;
@@ -23,6 +23,14 @@ export class Api {
 
   defaultDownloadPath(): Promise<{ path: string }> {
     return this.request('GET', '/api/local/download-path');
+  }
+
+  getSettings(): Promise<AppSettings> {
+    return this.request('GET', '/api/settings');
+  }
+
+  updateSettings(settings: AppSettings): Promise<AppSettings> {
+    return this.request('PUT', '/api/settings', settings);
   }
 
   openDownloadDirectory(): Promise<void> {

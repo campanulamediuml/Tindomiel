@@ -16,14 +16,20 @@ import (
 	"sync"
 )
 
+type ShortcutMapping struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 type Options struct {
-	Host                 string   `json:"host"`
-	Port                 int      `json:"port"`
-	User                 string   `json:"user"`
-	Auth                 string   `json:"auth"`
-	Password             string   `json:"password,omitempty"`
-	PrivateKeys          []string `json:"privateKeys"`
-	PrivateKeyPassphrase string   `json:"privateKeyPassphrase,omitempty"`
+	Host                 string            `json:"host"`
+	Port                 int               `json:"port"`
+	User                 string            `json:"user"`
+	Auth                 string            `json:"auth"`
+	Password             string            `json:"password,omitempty"`
+	PrivateKeys          []string          `json:"privateKeys"`
+	PrivateKeyPassphrase string            `json:"privateKeyPassphrase,omitempty"`
+	Shortcuts            []ShortcutMapping `json:"shortcuts,omitempty"`
 }
 
 type Profile struct {

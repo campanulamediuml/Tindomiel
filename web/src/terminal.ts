@@ -2,7 +2,9 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 import type { Api } from './api';
-import type { DisplayStatus, ResourceMetrics, SessionInfo, SessionStatus, TransferState } from './types';
+import { encodeShortcut, shortcutFromEvent } from './shortcuts';
+import { terminalThemes } from './terminal-themes';
+import type { AppSettings, DisplayStatus, ResourceMetrics, SessionInfo, SessionStatus, ShortcutMapping, TransferState } from './types';
 
 const encoder = new TextEncoder();
 
@@ -16,6 +18,7 @@ export class TerminalView {
   private websocket?: WebSocket;
   private disposed = false;
   private resizeFrame = 0;
+  private readonly shortcutMap: Map<string, string>;
 
   constructor(
     readonly session: SessionInfo,
@@ -25,28 +28,20 @@ export class TerminalView {
     private readonly onTransfer: (transfer: TransferState) => void,
     private readonly onMetrics: (metrics: ResourceMetrics) => void,
     private readonly onCwd: (path: string) => void,
+    settings: AppSettings,
+    shortcuts: ShortcutMapping[] = [],
   ) {
+    this.shortcutMap = new Map(shortcuts.map((shortcut) => [shortcut.from, shortcut.to]));
     this.element.className = 'terminal-view';
     this.element.dataset.sessionId = session.sessionId;
     this.terminal = new Terminal({
       allowProposedApi: true,
-      cursorBlink: true,
+      cursorBlink: settings.cursorBlink,
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
-      fontSize: 13,
+      fontSize: settings.fontSize,
       lineHeight: 1.35,
-      scrollback: 10_000,
-      theme: {
-        background: '#0B0E12',
-        foreground: '#D7DCE2',
-        cursor: '#4C8DFF',
-        selectionBackground: 'rgba(76,141,255,0.25)',
-        red: '#FF7B72',
-        green: '#7EE787',
-        yellow: '#F2CC60',
-        blue: '#79C0FF',
-        magenta: '#D2A8FF',
-        cyan: '#76E3EA',
-      },
+      scrollback: settings.scrollback,
+      theme: terminalThemes[settings.theme],
     });
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.open(this.element);
@@ -64,6 +59,16 @@ export class TerminalView {
       this.sendInput(bytes);
     });
     this.terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown' && this.handlesShortcut(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const mapped = this.shortcutMap.get(shortcutFromEvent(event));
+        if (mapped) {
+          const data = encodeShortcut(mapped);
+          if (data.length > 0) this.sendInput(data);
+        }
+        return false;
+      }
       if (event.type !== 'keydown' || !event.metaKey) return true;
       if (event.key.toLowerCase() === 'c' && this.terminal.hasSelection()) {
         event.preventDefault();
@@ -136,6 +141,27 @@ export class TerminalView {
 
   focus(): void {
     this.terminal.focus();
+  }
+
+  applySettings(settings: AppSettings): void {
+    this.terminal.options.theme = terminalThemes[settings.theme];
+    this.terminal.options.fontSize = settings.fontSize;
+    this.terminal.options.cursorBlink = settings.cursorBlink;
+    this.terminal.options.scrollback = settings.scrollback;
+    this.scheduleFit();
+  }
+
+  getShortcuts(): ShortcutMapping[] {
+    return Array.from(this.shortcutMap, ([from, to]) => ({ from, to }));
+  }
+
+  setShortcuts(shortcuts: ShortcutMapping[]): void {
+    this.shortcutMap.clear();
+    for (const shortcut of shortcuts) this.shortcutMap.set(shortcut.from, shortcut.to);
+  }
+
+  handlesShortcut(event: KeyboardEvent): boolean {
+    return event.type === 'keydown' && !event.isComposing && this.shortcutMap.has(shortcutFromEvent(event));
   }
 
   async reconnect(): Promise<void> {
