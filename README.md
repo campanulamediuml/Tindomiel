@@ -201,7 +201,7 @@ npm run tauri:build
 
 ## GitHub Actions 构建产物
 
-`.github/workflows/build.yml` 会在推送到 `main`、创建 `v*` 标签、Pull Request 或手动触发时，使用 GitHub 的 `macos-14` ARM64 runner 构建应用。工作流依次安装 Go 1.26、Node.js 26 和 Rust，执行 `npm ci`、前端依赖安装及 `npm run tauri:build`，最后生成：
+`.github/workflows/build.yml` 会在推送到 `main`、创建 `v*` 标签、Pull Request 或手动触发时，使用 GitHub 的 `macos-15` ARM64 runner 构建应用。工作流依次安装 Go 1.26、Node.js 26 和 Rust，执行 `npm ci`、前端依赖安装及 `npm run tauri:build`，最后生成：
 
 - `Tindomiel-macos-arm64.zip`：包含完整 `Tindomiel.app`，使用 `ditto` 保留 macOS 资源元数据。
 - `Tindomiel-macos-arm64.zip.sha256`：ZIP 的 SHA256 校验值。
