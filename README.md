@@ -206,7 +206,7 @@ npm run tauri:build
 - `Tindomiel-macos-arm64.zip`：包含完整 `Tindomiel.app`，使用 `ditto` 保留 macOS 资源元数据。
 - `Tindomiel-macos-arm64.zip.sha256`：ZIP 的 SHA256 校验值。
 
-构建完成后，在仓库 **Actions → 对应运行记录 → Artifacts → Tindomiel-macos-arm64** 下载，Artifact 保留 14 天。手动构建可在 Actions 的 `build` 工作流中点击 **Run workflow**。
+构建完成后，在仓库 **Actions → 对应运行记录 → Artifacts → Tindomiel-macos-arm64** 下载，Artifact 保留 14 天。推送 `v*` 标签时还会自动创建同名 **GitHub Release**，将 ZIP 和 SHA256 作为正式版本附件上传；手动构建可在 Actions 的 `build` 工作流中点击 **Run workflow**。
 
 当前流水线沿用项目的 `codesign --force --deep --sign -` ad-hoc 签名，不需要配置证书 secrets，可用于本机及内部测试；它不是 Developer ID 签名和 Apple 公证，其他 Mac 首次打开时可能出现 Gatekeeper 提示。正式公开分发还需配置 Developer ID 证书、专用 App Store Connect API Key、公证流程及相应仓库 secrets。
 
