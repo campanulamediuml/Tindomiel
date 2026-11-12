@@ -81,7 +81,13 @@ export interface ProcessMetrics {
   command: string;
 }
 
+export interface NetworkMetrics {
+  timestamp: number;
+  interfaces: { name: string; rxBytesPerSecond: number; txBytesPerSecond: number }[];
+}
+
 export interface ResourceMetrics {
+  timestamp: number;
   system: {
     hostname: string;
     osName: string;

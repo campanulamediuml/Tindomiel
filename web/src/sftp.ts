@@ -12,6 +12,8 @@ const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 
 interface DirectoryView {
   path: string;
   entries: FileEntry[];
+  loading: boolean;
+  error?: string;
 }
 
 export class SftpPanel {
@@ -23,7 +25,7 @@ export class SftpPanel {
   private sortDirection = 1;
   private readonly selected = new Set<string>();
   private readonly fileTypes = new Map<string, FileEntry['type']>();
-  private loadVersion = 0;
+  private readonly loadVersions = new Map<string, number>();
   private dragDepth = 0;
   private contextEntry?: FileEntry;
   private readonly tree: RemoteTree;
@@ -92,14 +94,13 @@ export class SftpPanel {
 
   removeSession(sessionId: string): void {
     this.views.delete(sessionId);
+    this.loadVersions.delete(sessionId);
     this.tree.removeSession(sessionId);
   }
 
   async setSession(sessionId?: string): Promise<void> {
     if (this.sessionId === sessionId) return;
-    if (this.sessionId) this.views.set(this.sessionId, { path: this.currentPath, entries: this.entries });
     this.sessionId = sessionId;
-    this.loadVersion += 1;
     this.selected.clear();
     if (!sessionId) {
       this.currentPath = '/';
@@ -114,40 +115,65 @@ export class SftpPanel {
       this.currentPath = cached.path;
       this.pathInput.value = cached.path;
       this.entries = cached.entries;
-      this.render();
       await this.tree.setSession(sessionId);
-      this.tree.setCurrent(this.currentPath);
+      if (cached.path !== '.') this.tree.setCurrent(cached.path);
+      this.restore(cached);
       return;
     }
+    this.views.set(sessionId, { path: '.', entries: [], loading: false });
     this.currentPath = '.';
     this.entries = [];
     this.fileList.textContent = '读取中…';
-    await Promise.all([this.tree.setSession(sessionId), this.load(this.currentPath)]);
+    await this.tree.setSession(sessionId);
+    void this.load(this.currentPath);
   }
 
   async load(remotePath = this.currentPath): Promise<void> {
     if (!this.sessionId) return;
     const sessionId = this.sessionId;
-    const version = ++this.loadVersion;
+    const view = this.views.get(sessionId) ?? { path: remotePath, entries: [], loading: false };
+    this.views.set(sessionId, view);
+    const version = (this.loadVersions.get(sessionId) ?? 0) + 1;
+    this.loadVersions.set(sessionId, version);
+    view.loading = true;
+    view.error = undefined;
     this.fileList.textContent = '读取中…';
+    const isCurrentRequest = () => this.loadVersions.get(sessionId) === version && this.views.get(sessionId) === view;
     try {
       const absolute = await this.api.realpath(sessionId, remotePath);
-      if (this.sessionId !== sessionId || this.loadVersion !== version) return;
-      this.currentPath = absolute;
-      this.pathInput.value = absolute;
+      if (!isCurrentRequest()) return;
+      view.path = absolute;
+      if (this.sessionId === sessionId) {
+        this.currentPath = absolute;
+        this.pathInput.value = absolute;
+      }
       const entries = await this.api.listFiles(sessionId, absolute);
-      if (this.sessionId !== sessionId || this.loadVersion !== version) return;
-      this.entries = entries;
-      this.views.set(sessionId, { path: absolute, entries });
-      this.selected.clear();
-      this.render();
-      this.tree.setDirectory(absolute, entries);
-      this.tree.setCurrent(absolute);
+      if (!isCurrentRequest()) return;
+      view.entries = entries;
+      view.loading = false;
+      this.tree.setDirectory(sessionId, absolute, entries);
+      if (this.sessionId === sessionId) {
+        this.currentPath = absolute;
+        this.entries = entries;
+        this.selected.clear();
+        this.render();
+        this.tree.setCurrent(absolute);
+      }
     } catch (error) {
-      if (this.sessionId !== sessionId || this.loadVersion !== version) return;
-      this.fileList.textContent = error instanceof ApiError && error.code === 'SFTP_UNAVAILABLE' ? error.message : '目录读取失败';
-      this.onError(messageOf(error));
+      if (!isCurrentRequest()) return;
+      view.loading = false;
+      view.error = error instanceof ApiError && error.code === 'SFTP_UNAVAILABLE' ? error.message : '目录读取失败';
+      if (this.sessionId === sessionId) {
+        this.fileList.textContent = view.error;
+        this.onError(messageOf(error));
+      }
     }
+  }
+
+  private restore(view: DirectoryView): void {
+    if (view.loading) this.fileList.textContent = '读取中…';
+    else if (view.error) this.fileList.textContent = view.error;
+    else this.render();
   }
 
   private render(): void {

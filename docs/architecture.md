@@ -19,7 +19,7 @@ Tauri / 系统 WebView（TypeScript + xterm.js）
 
 Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访问 token。macOS 应用菜单包含“设置…”和 `Cmd+,`，通过 Tauri 事件打开前端设置页。前端只加载本地静态资源，不直接持有私钥，也不直接发起 SSH 连接。
 
-原生 `app_metrics` 模块通过 PID 责任归属汇总主进程、Go sidecar 和 WebKit 辅助进程；普通 PPID 无法关联 launchd 名下的 WebKit 进程，因此使用 macOS responsibility 接口确认归属，再读取 `proc_pid_rusage`。前端每 3 秒调用一次 Tauri 命令，CPU 按相邻采样的累计 CPU 时间差计算，内存汇总 physical footprint，页面隐藏时暂停请求。
+原生 `app_metrics` 模块通过 PID 责任归属汇总主进程、Go sidecar 和 WebKit 辅助进程；普通 PPID 无法关联 launchd 名下的 WebKit 进程，因此使用 macOS responsibility 接口确认归属，再读取 `proc_pid_rusage`。前端每秒调用一次 Tauri 命令，窗口隐藏时也持续采样，耗时较长时通过 pending 标记避免请求重叠。CPU 按相邻采样的累计 CPU 时间差计算，先通过 `mach_timebase_info` 将 `proc_pid_rusage` 返回的 Mach absolute time 换算为纳秒，避免在不同 CPU 架构上误用时间单位；内存汇总 physical footprint。
 
 应用设置通过 `GET/PUT /api/settings` 持久化到 `preferences.json`；终端主题、字号、光标闪烁和回滚行数保存后立即更新所有 xterm 实例，下载目录沿用同一偏好存储。主题定义集中在前端 `terminal-themes.ts`，包含默认 Homebrew、macOS ClearDark 和原自定义 Boring；主题切换只更新渲染色板，不改变终端数据流。全局快捷键采用复制语义：每个 TerminalView 创建时从全局数组建立自己的 Map，后续全局保存不修改该 Map；Session 设置只更新当前 TerminalView，“同步全局配置”是显式覆盖当前 Session 编辑内容的操作。Session 快捷键只存于内存，重连保留，关闭标签释放。
 
@@ -64,7 +64,8 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - 文件夹通过 SFTP 递归下载，不另起 `scp` 进程；保留目录结构和普通文件权限，跳过符号链接，同名本地目录自动加序号
   - 文件夹任务聚合总字节数和进度，通过 `currentPath` 实时报告当前远程文件
   - 通过 RealPath 将当前目录规范化为绝对路径；目录树从 `/` 按需读取
-  - 前端按会话缓存目录树节点、展开状态、当前路径和文件列表，切换只恢复展示；手动刷新、进入目录、路径联动或上传完成后才重新读取，目录树节点 Map 按会话隔离
+  - 前端以 `Map<sessionId, TreeSnapshot>` 隔离目录树节点、用户展开状态和当前路径，并按会话缓存右侧当前目录及加载状态；首次只读取根目录和右侧当前目录，点击展开才读取子目录，未加载节点灰显。路径联动只更新当前路径，不自动展开或读取祖先目录；目录树刷新仅重新读取根目录和用户已展开节点，右侧刷新仅读取当前目录
+  - 目录树和右侧列表请求均按原 `sessionId` 写回缓存，切换到其他标签不取消、不丢弃结果，也不渲染到当前会话；切回时恢复已完成结果或“读取中”状态，同一会话仅接受最新目录请求，关闭会话后忽略迟到响应。手动刷新、进入目录、路径联动或上传完成后才重新读取右侧列表，普通标签切换不重新请求
   - 文件列表初始目录优先、名称升序，支持名称、mtime、创建时间点击排序及列宽拖拽；Linux 通过 GNU `stat %W` 批量获取出生时间，macOS 通过 BSD `stat -f %B` 和 NUL 分隔批量获取，Windows 通过 PowerShell `CreationTimeUtc` 逐项容错获取；SFTP 的 `/C:/...` 规范路径在查询前转换为 PowerShell 使用的 `C:/...`，未知值返回 0 并显示 `—`
   - 缓存编辑将文件放入用户缓存目录下的会话私有目录（0700 / 0600），调用 macOS `open` 打开
   - 监听缓存目录而非单个文件 inode，兼容 VSCode 原子保存；事件去抖后自动上传原远程路径
@@ -76,11 +77,12 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - Windows 优先通过 UTF-16LE Base64 的 `powershell -NoProfile -NonInteractive -EncodedCommand` 执行 CIM 采集；服务端拒绝 exec 时，使用独立的交互 Shell channel 回退，PTY 类型为 `dumb`
   - 默认 `cmd.exe` 禁止启动 PowerShell时，自动改用 Windows 自带的 `systeminfo` 和带引号的 `typeperf` 英文计数器采集，不再依赖嵌套 PowerShell；采集器选择按会话缓存，避免每次监控重复探测
   - Windows 回退结果使用 Base64 短行分块，每块带序号和总数，后端校验缺块、重块、顺序和 UTF-8 后解码，避免 ConPTY 改写长行；解码后的监控数据采用 `SYS|...`、`PROC|...`、`NET|...`、`DISK|...` 等键值文本协议，不依赖终端中的 JSON 或提示符位置
-  - CPU 和网络速率使用采样差值；本机 ping 目标 IP 获取延迟
-  - 每个逻辑会话由 Manager 启动一个后台监控 goroutine，持续采集并更新该 Session 的互斥快照缓存，关闭会话时停止并等待 goroutine 退出
-  - 正常采集间隔为 1 秒，失败退避为 3 秒；Windows 实际间隔还包含 PowerShell/CIM 采集耗时
-  - 快照通过 WS `metrics` 控制帧推送；REST 只读取最近缓存，初次缓存尚未建立时才同步采集
-  - 前端按 `sessionId` 保存最近快照、各网卡最近 40 个样本、ping 历史和网卡选择，后台标签也持续追加；隐藏标签只更新内存、不渲染 DOM，切换标签直接展示已有曲线，不触发远端采集
+  - CPU 使用采样差值，本机 ping 目标 IP 获取延迟；网卡由独立采样链路按一秒时间槽推送。Linux/macOS 每秒读取累计字节数，900ms 超时或失败的槽为 0，相邻成功样本的差值除以跨过的整数秒数，失败不推进基线也不回填失败槽；Windows 通过持续运行的 `typeperf` 通道直接读取系统每秒速率，连续样本按序号分配逐秒时间槽，避免每次启动进程的开销和到达抖动，启动或断流期间缺秒补 0
+  - 每个逻辑会话由 Manager 启动普通资源和网络两个后台监控 goroutine，持续采集并更新该 Session 的互斥快照缓存，关闭会话时停止并等待 goroutine 退出；首次采样按 Session ID 在 1 秒窗口内确定性错峰，关闭可立即打断等待
+  - 主机名、系统版本、内核、架构、CPU 型号和核心数按 SSH generation 缓存，重连后重新采集；信息不完整或采集失败不写入缓存，Linux、macOS、PowerShell 和 CMD 均保留动态数据及原有回退路径
+  - 普通资源在一轮完成后等待 1 秒，失败退避为 3 秒；Windows 实际间隔还包含 PowerShell/CIM 采集耗时，不影响独立网络循环
+  - 普通快照通过 WS `metrics` 控制帧推送，网络样本通过独立 `network` 帧推送；REST 只读取最近缓存并附带最近网络结果，初次缓存尚未建立时才同步采集
+  - 网络样本携带本机 Unix 秒级业务时间戳，仅用于图表对齐和排序，不依赖远端时钟；前端按 `sessionId` 保存最近快照、各网卡最近 40 秒连续时间轴、ping 历史和网卡选择，同一秒覆盖、缺秒补 0、窗口内迟到样本按原时间回填，后台标签也按时间推进；隐藏标签只更新内存、不渲染 DOM，切换标签直接展示已有曲线，不触发远端采集
 - **Logging**
   - 后端输出 JSON Lines 到标准错误和日志文件，单个文件达到 4 MiB 后轮转，启动时及运行期间每小时清理超过 3 天的备份
   - 前端将界面事件写入 localStorage，最多保留 300 条且只保留最近 3 天

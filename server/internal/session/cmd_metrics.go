@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,8 +16,12 @@ type windowsCounter struct {
 	counter  string
 }
 
-func (s *Session) cmdMetrics(ctx context.Context) (ResourceMetrics, error) {
-	command := `chcp 65001 >nul & echo __SYSTEM__ & systeminfo /FO CSV & echo __ENV__ & echo %NUMBER_OF_PROCESSORS% & echo %PROCESSOR_ARCHITECTURE% & echo __CPUINFO__ & reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v ProcessorNameString & echo __COUNTERS__ & typeperf "\Processor(_Total)\% Processor Time" "\System\System Up Time" "\Memory\Available Bytes" "\Paging File(*)\% Usage" "\Process(*)\ID Process" "\Process(*)\% Processor Time" "\Process(*)\Working Set - Private" "\Network Interface(*)\Bytes Received/sec" "\Network Interface(*)\Bytes Sent/sec" "\LogicalDisk(*)\Free Megabytes" "\LogicalDisk(*)\% Free Space" -sc 1`
+func (s *Session) cmdMetrics(ctx context.Context, generation uint64) (ResourceMetrics, error) {
+	static, cached := s.cachedStaticMetrics(generation)
+	command := `chcp 65001 >nul & echo __SYSTEM__ & systeminfo /FO CSV & echo __ENV__ & echo %NUMBER_OF_PROCESSORS% & echo %PROCESSOR_ARCHITECTURE% & echo __CPUINFO__ & reg query "HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0" /v ProcessorNameString & echo __COUNTERS__ & typeperf "\Processor(_Total)\% Processor Time" "\System\System Up Time" "\Memory\Available Bytes" "\Paging File(*)\% Usage" "\Process(*)\ID Process" "\Process(*)\% Processor Time" "\Process(*)\Working Set - Private" "\LogicalDisk(*)\Free Megabytes" "\LogicalDisk(*)\% Free Space" -sc 1`
+	if cached {
+		command = `chcp 65001 >nul & echo __COUNTERS__ & typeperf "\Processor(_Total)\% Processor Time" "\System\System Up Time" "\Memory\Available Bytes" "\Paging File(*)\% Usage" "\Process(*)\ID Process" "\Process(*)\% Processor Time" "\Process(*)\Working Set - Private" "\LogicalDisk(*)\Free Megabytes" "\LogicalDisk(*)\% Free Space" -sc 1`
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	output, err := s.exec(ctx, command)
@@ -24,9 +29,16 @@ func (s *Session) cmdMetrics(ctx context.Context) (ResourceMetrics, error) {
 		return ResourceMetrics{}, fmt.Errorf("read cmd metrics: %w", err)
 	}
 	sections := splitSections(string(output))
-	result, err := parseCmdSystem(sections["SYSTEM"], sections["ENV"], sections["CPUINFO"])
-	if err != nil {
-		return ResourceMetrics{}, err
+	result := ResourceMetrics{LoadAverage: []float64{}, Processes: []ProcessMetrics{}, Interfaces: []InterfaceMetrics{}, Disks: []DiskMetrics{}}
+	if cached {
+		result.System = static.system
+		result.Memory.Total = static.memoryTotal
+		result.Swap.Total = static.swapTotal
+	} else {
+		result, err = parseCmdSystem(sections["SYSTEM"], sections["ENV"], sections["CPUINFO"])
+		if err != nil {
+			return ResourceMetrics{}, err
+		}
 	}
 	counters, err := parseWindowsCounters(sections["COUNTERS"])
 	if err != nil {
@@ -184,6 +196,7 @@ func parseCmdInterfaces(counters map[windowsCounter]float64) []InterfaceMetrics 
 	for _, network := range interfaces {
 		result = append(result, network)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result
 }
 

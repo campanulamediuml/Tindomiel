@@ -62,6 +62,13 @@ fn cpu_percent(previous_ns: u64, current_ns: u64, elapsed_ns: u128) -> Option<f6
     Some((current_ns - previous_ns) as f64 / elapsed_ns as f64 * 100.0)
 }
 
+fn absolute_time_ns(time: u64, numer: u32, denom: u32) -> u64 {
+    if denom == 0 {
+        return 0;
+    }
+    ((time as u128 * numer as u128 / denom as u128).min(u64::MAX as u128)) as u64
+}
+
 #[cfg(target_os = "macos")]
 fn process_usages(owner: i32) -> Vec<ProcessUsage> {
     use std::ffi::{c_int, c_void};
@@ -83,12 +90,23 @@ fn process_usages(owner: i32) -> Vec<ProcessUsage> {
         _proc_exit_abstime: u64,
     }
 
+    #[repr(C)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+
     unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
         fn proc_listallpids(buffer: *mut c_void, buffersize: c_int) -> c_int;
         fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
         fn responsibility_get_pid_responsible_for_pid(pid: c_int) -> c_int;
     }
 
+    let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
+    if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase.denom == 0 {
+        return Vec::new();
+    }
     let bytes = unsafe { proc_listallpids(null_mut(), 0) };
     if bytes <= 0 {
         return Vec::new();
@@ -118,7 +136,11 @@ fn process_usages(owner: i32) -> Vec<ProcessUsage> {
                 return None;
             }
             Some(ProcessUsage {
-                cpu_time_ns: usage.user_time.saturating_add(usage.system_time),
+                cpu_time_ns: absolute_time_ns(
+                    usage.user_time.saturating_add(usage.system_time),
+                    timebase.numer,
+                    timebase.denom,
+                ),
                 memory_bytes: usage.phys_footprint,
             })
         })
@@ -140,6 +162,13 @@ mod tests {
         assert_eq!(cpu_percent(100, 100, 1_000), Some(0.0));
         assert_eq!(cpu_percent(100, 350, 0), None);
         assert_eq!(cpu_percent(350, 100, 1_000), None);
+    }
+
+    #[test]
+    fn converts_mach_absolute_time_to_nanoseconds() {
+        assert_eq!(absolute_time_ns(24, 125, 3), 1_000);
+        assert_eq!(absolute_time_ns(100, 1, 1), 100);
+        assert_eq!(absolute_time_ns(100, 1, 0), 0);
     }
 
     #[cfg(target_os = "macos")]

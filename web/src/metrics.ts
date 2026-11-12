@@ -1,10 +1,12 @@
 import type { Api } from './api';
-import type { DisplayStatus, ResourceMetrics } from './types';
+import type { DisplayStatus, NetworkMetrics, ResourceMetrics } from './types';
 import { element, formatDuration, formatRate, formatSize } from './utils';
 
 interface NetworkHistory {
   rx: number[];
   tx: number[];
+  timestamps: number[];
+  maximum: number;
 }
 
 interface SessionHistory {
@@ -26,6 +28,14 @@ interface DiskRow {
   bar: HTMLDivElement;
 }
 
+interface CanvasGeometry {
+  width: number;
+  height: number;
+}
+
+const canvasGeometries = new WeakMap<HTMLCanvasElement, CanvasGeometry>();
+const canvasRenderSignatures = new WeakMap<HTMLCanvasElement, string>();
+
 export class MetricsPanel {
   private sessionId?: string;
   private status?: DisplayStatus;
@@ -39,8 +49,6 @@ export class MetricsPanel {
   private host = '';
   private latest?: ResourceMetrics;
   private activeInterface = '';
-  private networkAnimationFrame = 0;
-  private displayedNetwork: NetworkHistory = { rx: [], tx: [] };
   private sessionVersion = 0;
   private readonly processRows: ProcessRow[] = [];
   private readonly diskRows = new Map<string, DiskRow>();
@@ -50,8 +58,7 @@ export class MetricsPanel {
     element<HTMLButtonElement>('sort-cpu').addEventListener('click', () => this.changeSort('cpu'));
     element<HTMLButtonElement>('sort-memory').addEventListener('click', () => this.changeSort('memory'));
     element<HTMLSelectElement>('network-interface').addEventListener('change', (event) => {
-      this.selectedInterface = (event.currentTarget as HTMLSelectElement).value;
-      this.drawNetwork();
+      this.selectInterface((event.currentTarget as HTMLSelectElement).value);
     });
     element<HTMLButtonElement>('copy-ip').addEventListener('click', () => {
       const host = element<HTMLElement>('target-ip').dataset.host;
@@ -62,9 +69,15 @@ export class MetricsPanel {
       element<HTMLDialogElement>('metrics-dialog').showModal();
     });
     new ResizeObserver(() => {
+      canvasGeometries.delete(element<HTMLCanvasElement>('network-chart'));
+      canvasGeometries.delete(element<HTMLCanvasElement>('ping-chart'));
       this.drawNetwork();
       this.drawPing();
     }).observe(element<HTMLElement>('metrics-panel'));
+    const networkCanvas = element<HTMLCanvasElement>('network-chart');
+    networkCanvas.addEventListener('mousemove', (event) => this.showNetworkTooltip(event));
+    networkCanvas.addEventListener('mouseleave', () => { networkCanvas.title = ''; });
+    window.setInterval(() => this.advanceNetworkTime(), 1000);
   }
 
   setSession(sessionId: string | undefined, host = '', status?: DisplayStatus): void {
@@ -92,8 +105,17 @@ export class MetricsPanel {
 
   receive(sessionId: string, metrics: ResourceMetrics): void {
     this.snapshots.set(sessionId, metrics);
-    this.recordHistory(sessionId, metrics);
+    this.recordPing(sessionId, metrics);
     if (this.sessionId === sessionId && this.status === 'ready') this.render(metrics);
+  }
+
+  receiveNetwork(sessionId: string, metrics: NetworkMetrics): void {
+    const cached = this.snapshots.get(sessionId);
+    if (cached) cached.interfaces = metrics.interfaces;
+    this.recordHistory(sessionId, metrics);
+    if (this.sessionId !== sessionId || this.status !== 'ready') return;
+    if (this.latest) this.latest.interfaces = metrics.interfaces;
+    this.renderNetwork(metrics);
   }
 
   removeSession(sessionId: string): void {
@@ -110,18 +132,32 @@ export class MetricsPanel {
     return history;
   }
 
-  private recordHistory(sessionId: string, metrics: ResourceMetrics): void {
+  private recordHistory(sessionId: string, metrics: NetworkMetrics): void {
     const history = this.historyFor(sessionId);
-    for (const iface of metrics.interfaces) {
-      const network = history.network.get(iface.name) ?? { rx: [], tx: [] };
-      network.rx.push(iface.rxBytesPerSecond);
-      network.tx.push(iface.txBytesPerSecond);
-      if (network.rx.length > 40) network.rx.shift();
-      if (network.tx.length > 40) network.tx.shift();
-      history.network.set(iface.name, network);
+    const timestamp = metrics.timestamp ?? Math.floor(Date.now() / 1000);
+    const names = new Set([...history.network.keys(), ...metrics.interfaces.map((iface) => iface.name)]);
+    for (const name of names) {
+      const iface = metrics.interfaces.find((item) => item.name === name);
+      const network = history.network.get(name) ?? { rx: [], tx: [], timestamps: [], maximum: 1 };
+      appendNetworkSample(network, timestamp, iface?.rxBytesPerSecond ?? 0, iface?.txBytesPerSecond ?? 0);
+      history.network.set(name, network);
     }
-    history.ping.push(metrics.pingMs);
-    if (history.ping.length > 40) history.ping.shift();
+  }
+
+  private recordPing(sessionId: string, metrics: ResourceMetrics): void {
+    const history = this.historyFor(sessionId).ping;
+    history.push(metrics.pingMs);
+    if (history.length > 40) history.shift();
+  }
+
+  private advanceNetworkTime(): void {
+    const timestamp = Math.floor(Date.now() / 1000);
+    for (const history of this.histories.values()) {
+      for (const network of history.network.values()) {
+        if (network.timestamps.length > 0) appendNetworkSample(network, timestamp, 0, 0);
+      }
+    }
+    if (this.sessionId && this.status === 'ready') this.drawNetwork();
   }
 
   private async loadCached(): Promise<void> {
@@ -131,7 +167,7 @@ export class MetricsPanel {
     try {
       const metrics = await this.api.metrics(sessionId);
       this.snapshots.set(sessionId, metrics);
-      this.recordHistory(sessionId, metrics);
+      this.recordPing(sessionId, metrics);
       if (this.sessionId === sessionId && this.sessionVersion === version && this.status === 'ready') this.render(metrics);
     } catch {
       if (this.sessionId === sessionId && this.sessionVersion === version && this.status === 'ready') {
@@ -283,21 +319,30 @@ export class MetricsPanel {
         row = createProcessRow();
         this.processRows.push(row);
       }
-      row.root.hidden = false;
+      if (row.root.hidden) row.root.hidden = false;
       setText(row.memory, formatSize(process.memoryBytes));
-      row.memory.style.background = barBackground(process.memoryBytes, maxMemory, '76, 141, 255');
+      setBackground(row.memory, barBackground(process.memoryBytes, maxMemory, '76, 141, 255'));
       setText(row.cpu, process.cpuPercent.toFixed(1));
-      row.cpu.style.background = barBackground(process.cpuPercent, maxCPU, '63, 185, 80');
+      setBackground(row.cpu, barBackground(process.cpuPercent, maxCPU, '63, 185, 80'));
       setText(row.command, process.command);
-      row.command.title = `${process.pid} ${process.command}`;
+      const title = `${process.pid} ${process.command}`;
+      if (row.command.title !== title) row.command.title = title;
       if (list.children[index] !== row.root) list.insertBefore(row.root, list.children[index] ?? null);
     });
     for (let index = processes.length; index < this.processRows.length; index += 1) {
-      this.processRows[index]!.root.hidden = true;
+      const row = this.processRows[index]!;
+      if (!row.root.hidden) row.root.hidden = true;
     }
   }
 
-  private renderNetwork(metrics: ResourceMetrics): void {
+  private selectInterface(value: string): void {
+    this.selectedInterface = value;
+    this.activeInterface = value === 'auto' ? '' : value;
+    if (this.latest) this.renderNetwork(this.latest);
+    else this.drawNetwork();
+  }
+
+  private renderNetwork(metrics: NetworkMetrics): void {
     if (!this.selectedInterface) this.selectedInterface = 'auto';
     const signature = metrics.interfaces.map((item) => item.name).join('\0');
     const select = element<HTMLSelectElement>('network-interface');
@@ -315,14 +360,19 @@ export class MetricsPanel {
       }
       select.value = this.selectedInterface;
     }
+    const current = metrics.interfaces.find((item) => item.name === this.activeInterface);
     const active = this.selectedInterface === 'auto'
-      ? metrics.interfaces.reduce((best, item) => item.rxBytesPerSecond + item.txBytesPerSecond > (best?.rxBytesPerSecond ?? 0) + (best?.txBytesPerSecond ?? 0) ? item : best, metrics.interfaces[0])
+      ? current ?? metrics.interfaces.reduce((best, item) => item.rxBytesPerSecond + item.txBytesPerSecond > (best?.rxBytesPerSecond ?? 0) + (best?.txBytesPerSecond ?? 0) ? item : best, metrics.interfaces[0])
       : metrics.interfaces.find((item) => item.name === this.selectedInterface) ?? metrics.interfaces[0];
     this.activeInterface = active?.name ?? '';
+    const rates = element<HTMLSpanElement>('network-rates');
     if (active) {
-      const rates = element<HTMLSpanElement>('network-rates');
-      rates.textContent = `↑ ${compactRate(active.txBytesPerSecond)} ↓ ${compactRate(active.rxBytesPerSecond)}`;
-      rates.title = `↑ ${formatRate(active.txBytesPerSecond)} ↓ ${formatRate(active.rxBytesPerSecond)} · ${active.name}`;
+      setText(rates, `↑ ${compactRate(active.txBytesPerSecond)} ↓ ${compactRate(active.rxBytesPerSecond)}`);
+      const title = `↑ ${formatRate(active.txBytesPerSecond)} ↓ ${formatRate(active.rxBytesPerSecond)} · ${active.name}`;
+      if (rates.title !== title) rates.title = title;
+    } else {
+      setText(rates, '↑ — ↓ —');
+      rates.title = '';
     }
     this.drawNetwork();
   }
@@ -341,38 +391,33 @@ export class MetricsPanel {
         row = createDiskRow(disk.path);
         this.diskRows.set(disk.path, row);
       }
-      row.root.hidden = false;
+      if (row.root.hidden) row.root.hidden = false;
       setText(row.size, `${formatSize(disk.used)} / ${formatSize(disk.total)}`);
-      row.bar.style.width = `${Math.min(100, Math.max(0, disk.usedPercent))}%`;
+      setWidth(row.bar, disk.usedPercent);
       if (list.children[index] !== row.root) list.insertBefore(row.root, list.children[index] ?? null);
     });
   }
 
-  private drawNetwork(): void {
-    const target = this.sessionId ? this.historyFor(this.sessionId).network.get(this.activeInterface) ?? { rx: [], tx: [] } : { rx: [], tx: [] };
-    const from = this.displayedNetwork;
-    cancelAnimationFrame(this.networkAnimationFrame);
-    if (from.rx.length === 0 && from.tx.length === 0) {
-      this.displayedNetwork = target;
-      drawNetworkBars(target);
+  private showNetworkTooltip(event: MouseEvent): void {
+    const canvas = event.currentTarget as HTMLCanvasElement;
+    const history = this.sessionId ? this.historyFor(this.sessionId).network.get(this.activeInterface) : undefined;
+    if (!history) return;
+    history.timestamps ??= [];
+    const bounds = canvas.getBoundingClientRect();
+    const count = Math.min(history.timestamps.length, Math.floor(bounds.width / 5));
+    const fromRight = Math.max(0, Math.ceil((bounds.width - (event.clientX - bounds.left)) / 5) - 1);
+    const visibleIndex = count - fromRight - 1;
+    if (visibleIndex < 0 || visibleIndex >= count) {
+      canvas.title = '';
       return;
     }
-    drawNetworkBars(from);
-    const startedAt = performance.now();
-    const draw = (now: number) => {
-      const progress = Math.min(1, (now - startedAt) / 320);
-      const current = {
-        rx: target.rx.map((value, index) => (from.rx[index] ?? 0) + (value - (from.rx[index] ?? 0)) * progress),
-        tx: target.tx.map((value, index) => (from.tx[index] ?? 0) + (value - (from.tx[index] ?? 0)) * progress),
-      };
-      drawNetworkBars(current);
-      if (progress < 1) {
-        this.networkAnimationFrame = requestAnimationFrame(draw);
-      } else {
-        this.displayedNetwork = target;
-      }
-    };
-    this.networkAnimationFrame = requestAnimationFrame(draw);
+    const index = history.timestamps.length - count + visibleIndex;
+    canvas.title = `${formatClock(history.timestamps[index]!)}\n↑ ${formatRate(history.tx[index] ?? 0)} ↓ ${formatRate(history.rx[index] ?? 0)}`;
+  }
+
+  private drawNetwork(): void {
+    const history = this.sessionId ? this.historyFor(this.sessionId).network.get(this.activeInterface) : undefined;
+    drawNetworkBars(history ?? { rx: [], tx: [], timestamps: [], maximum: 1 });
   }
 
   private drawPing(): void {
@@ -395,20 +440,20 @@ export class MetricsPanel {
   private clearView(): void {
     this.latest = undefined;
     this.activeInterface = '';
-    this.displayedNetwork = { rx: [], tx: [] };
-    cancelAnimationFrame(this.networkAnimationFrame);
-    element<HTMLDivElement>('system-uptime').textContent = '运行 —';
-    element<HTMLDivElement>('system-load').textContent = '负载 —';
-    element<HTMLSpanElement>('cpu-text').textContent = '—';
-    element<HTMLSpanElement>('memory-text').textContent = '—';
-    element<HTMLSpanElement>('swap-text').textContent = '—';
+    setText(element<HTMLDivElement>('system-uptime'), '运行 —');
+    setText(element<HTMLDivElement>('system-load'), '负载 —');
+    setText(element<HTMLSpanElement>('cpu-text'), '—');
+    setText(element<HTMLSpanElement>('memory-text'), '—');
+    setText(element<HTMLSpanElement>('swap-text'), '—');
     setMeter('cpu-bar', 0);
     setMeter('memory-bar', 0);
     setMeter('swap-bar', 0);
-    element<HTMLSpanElement>('network-rates').textContent = '↑ — ↓ —';
-    element<HTMLSpanElement>('ping-text').textContent = '— ms';
+    setText(element<HTMLSpanElement>('network-rates'), '↑ — ↓ —');
+    setText(element<HTMLSpanElement>('ping-text'), '— ms');
     element<HTMLSelectElement>('network-interface').replaceChildren();
-    for (const row of this.processRows) row.root.hidden = true;
+    for (const row of this.processRows) {
+      if (!row.root.hidden) row.root.hidden = true;
+    }
     for (const row of this.diskRows.values()) row.root.remove();
     this.diskRows.clear();
     if (element<HTMLDialogElement>('metrics-dialog').open) this.renderDialog();
@@ -449,9 +494,16 @@ function setText(target: HTMLElement, value: string): void {
 }
 
 function setMeter(id: string, value: number): void {
-  const bar = element<HTMLDivElement>(id);
+  setWidth(element<HTMLDivElement>(id), value);
+}
+
+function setWidth(target: HTMLElement, value: number): void {
   const width = `${Math.min(100, Math.max(0, value))}%`;
-  if (bar.style.width !== width) bar.style.width = width;
+  if (target.style.width !== width) target.style.width = width;
+}
+
+function setBackground(target: HTMLElement, value: string): void {
+  if (target.style.background !== value) target.style.background = value;
 }
 
 function compactRate(value: number): string {
@@ -462,11 +514,20 @@ function arrow(direction: number): string {
   return direction > 0 ? '↑' : '↓';
 }
 
+function geometryFor(canvas: HTMLCanvasElement): CanvasGeometry {
+  const cached = canvasGeometries.get(canvas);
+  if (cached) return cached;
+  const geometry = { width: canvas.clientWidth, height: canvas.clientHeight };
+  canvasGeometries.set(canvas, geometry);
+  return geometry;
+}
+
 function drawChart(id: string, series: { values: number[]; color: string }[]): void {
   const canvas = element<HTMLCanvasElement>(id);
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
+  const { width, height } = geometryFor(canvas);
   const ratio = window.devicePixelRatio || 1;
+  const signature = JSON.stringify([width, height, ratio, series.map((item) => [item.color, item.values])]);
+  if (canvasRenderSignatures.get(canvas) === signature) return;
   if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
     canvas.width = Math.round(width * ratio);
     canvas.height = Math.round(height * ratio);
@@ -498,6 +559,7 @@ function drawChart(id: string, series: { values: number[]; color: string }[]): v
     });
     context.stroke();
   }
+  canvasRenderSignatures.set(canvas, signature);
 }
 
 function addMetricCard(parent: HTMLElement, label: string, value: string, percent: number): void {
@@ -522,11 +584,50 @@ function textSpan(text: string): HTMLSpanElement {
   return span;
 }
 
+function appendNetworkSample(history: NetworkHistory, timestamp: number, rx: number, tx: number): void {
+  history.timestamps ??= [];
+  const second = Math.floor(timestamp);
+  if (history.timestamps.length === 0 && history.rx.length > 0) {
+    const first = second - history.rx.length;
+    history.timestamps = history.rx.map((_, index) => first + index);
+  }
+  const existing = history.timestamps.indexOf(second);
+  if (existing >= 0) {
+    history.rx[existing] = rx;
+    history.tx[existing] = tx;
+  } else if (history.timestamps.length === 0) {
+    history.timestamps.push(second);
+    history.rx.push(rx);
+    history.tx.push(tx);
+  } else {
+    const last = history.timestamps.at(-1)!;
+    if (second <= last) return;
+    const firstMissing = Math.max(last + 1, second - 39);
+    for (let missing = firstMissing; missing < second; missing += 1) {
+      history.timestamps.push(missing);
+      history.rx.push(0);
+      history.tx.push(0);
+    }
+    history.timestamps.push(second);
+    history.rx.push(rx);
+    history.tx.push(tx);
+  }
+  const excess = history.rx.length - 40;
+  if (excess > 0) {
+    history.rx.splice(0, excess);
+    history.tx.splice(0, excess);
+    history.timestamps.splice(0, excess);
+  }
+  history.maximum = Math.max(1, ...history.rx, ...history.tx);
+}
+
 function drawNetworkBars(history: NetworkHistory): void {
+  history.timestamps ??= [];
   const canvas = element<HTMLCanvasElement>('network-chart');
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
+  const { width, height } = geometryFor(canvas);
   const ratio = window.devicePixelRatio || 1;
+  const signature = JSON.stringify([width, height, ratio, history.maximum, history.rx, history.tx, history.timestamps]);
+  if (canvasRenderSignatures.get(canvas) === signature) return;
   if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
     canvas.width = Math.round(width * ratio);
     canvas.height = Math.round(height * ratio);
@@ -535,7 +636,13 @@ function drawNetworkBars(history: NetworkHistory): void {
   if (!context || width === 0) return;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.clearRect(0, 0, width, height);
-  const maximum = Math.max(1, ...history.rx, ...history.tx);
+  const visibleCount = Math.min(history.timestamps.length, Math.floor(width / 5));
+  const visibleTimestamps = history.timestamps.slice(-visibleCount);
+  const startLabel = document.getElementById('network-time-start');
+  const endLabel = document.getElementById('network-time-end');
+  if (startLabel) setText(startLabel, visibleTimestamps.length ? formatClock(visibleTimestamps[0]!) : '—');
+  if (endLabel) setText(endLabel, visibleTimestamps.length ? formatClock(visibleTimestamps.at(-1)!) : '—');
+  const maximum = history.maximum;
   const centerY = Math.floor(height / 2) + 0.5;
   const plotHeight = Math.max(1, height / 2 - 14);
 
@@ -576,6 +683,11 @@ function drawNetworkBars(history: NetworkHistory): void {
       drawing.fillRect(x, y, barWidth, barHeight);
     });
   }
+  canvasRenderSignatures.set(canvas, signature);
+}
+
+function formatClock(timestamp: number): string {
+  return new Date(timestamp * 1000).toLocaleTimeString('zh-CN', { hour12: false });
 }
 
 function barBackground(value: number, maximum: number, rgb: string): string {

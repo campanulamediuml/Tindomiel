@@ -8,16 +8,25 @@ import (
 	"time"
 )
 
-func (s *Session) darwinMetrics(ctx context.Context) (ResourceMetrics, error) {
+func (s *Session) darwinMetrics(ctx context.Context, generation uint64) (ResourceMetrics, error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	output, err := s.exec(ctx, `echo __UPTIME__; sysctl -n kern.boottime; sysctl -n vm.loadavg; echo __SYSTEM__; hostname; uname -r; uname -m; sysctl -n hw.ncpu; sw_vers -productName; sw_vers -productVersion; sysctl -n machdep.cpu.brand_string; echo __CPU__; top -l 2 -n 0 -s 1 -stats cpu | grep 'CPU usage'; echo __MEM__; sysctl -n hw.memsize; vm_stat; echo __SWAP__; sysctl -n vm.swapusage; echo __NET__; netstat -ibn; echo __DISK__; df -k; echo __PROC__; ps -axo pid=,pcpu=,rss=,args=`)
+	static, cached := s.cachedStaticMetrics(generation)
+	command := `echo __UPTIME__; sysctl -n kern.boottime; sysctl -n vm.loadavg; echo __SYSTEM__; hostname; uname -r; uname -m; sysctl -n hw.ncpu; sw_vers -productName; sw_vers -productVersion; sysctl -n machdep.cpu.brand_string; echo __CPU__; top -l 2 -n 0 -s 1 -stats cpu | grep 'CPU usage'; echo __MEM__; sysctl -n hw.memsize; vm_stat; echo __SWAP__; sysctl -n vm.swapusage; echo __DISK__; df -k; echo __PROC__; ps -axo pid=,pcpu=,rss=,args=`
+	if cached {
+		command = `echo __UPTIME__; sysctl -n kern.boottime; sysctl -n vm.loadavg; echo __CPU__; top -l 2 -n 0 -s 1 -stats cpu | grep 'CPU usage'; echo __MEM__; sysctl -n hw.memsize; vm_stat; echo __SWAP__; sysctl -n vm.swapusage; echo __DISK__; df -k; echo __PROC__; ps -axo pid=,pcpu=,rss=,args=`
+	}
+	output, err := s.exec(ctx, command)
 	if err != nil {
 		return ResourceMetrics{}, fmt.Errorf("read macOS metrics: %w", err)
 	}
 	sections := splitSections(string(output))
+	system := static.system
+	if !cached {
+		system = parseDarwinSystem(sections["SYSTEM"])
+	}
 	result := ResourceMetrics{
-		System:      parseDarwinSystem(sections["SYSTEM"]),
+		System:      system,
 		LoadAverage: parseDarwinLoad(sections["UPTIME"]),
 		CPUPercent:  parseDarwinCPU(sections["CPU"]),
 		Processes:   parseProcesses(sections["PROC"]),
@@ -26,7 +35,6 @@ func (s *Session) darwinMetrics(ctx context.Context) (ResourceMetrics, error) {
 	result.UptimeSeconds = parseDarwinUptime(sections["UPTIME"])
 	result.Memory = parseDarwinMemory(sections["MEM"])
 	result.Swap = parseDarwinSwap(sections["SWAP"])
-	result.Interfaces = s.networkRates(parseDarwinNetwork(sections["NET"]))
 	return result, nil
 }
 

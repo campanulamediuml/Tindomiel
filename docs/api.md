@@ -204,6 +204,7 @@ POST /api/local/choose-application
 ```
 GET /api/metrics/:sessionId
 → {
+    "timestamp": 1794468642,
     "system": { "hostname": "socat", "osName": "Ubuntu 22.04.4 LTS", "kernelVersion": "5.15.133.1", "architecture": "x86_64", "cpuModel": "Intel Core i7", "cpuCores": 16 },
     "uptimeSeconds": 259200,
     "loadAverage": [0.14, 0.34, 0.75],
@@ -217,7 +218,11 @@ GET /api/metrics/:sessionId
   }
 ```
 
-每个会话由后端后台 goroutine 持续采集并维护最近快照。GET 优先返回缓存，初次缓存尚未建立时才同步采集；前端不通过定时 REST 请求维持监控，而是接收 WS 推送。进程默认按资源占用降序，点击 CPU 或内存表头可切换升序/降序。网络默认自动选择活动网卡，也可按接口名手动切换；网络图以中间横线为零轴，红色上行柱向上、绿色下行柱向下，图表高度、柱宽和间距固定。
+每个会话由后端后台 goroutine 持续采集并维护最近快照，首次采样按 Session ID 在 1 秒窗口内错峰。普通资源快照的 `timestamp` 是本机 Go sidecar 在动态采集完成时生成的 Unix 秒级时间戳，不读取或代表远端服务器时钟。静态系统信息按 SSH 连接代次缓存，重连后重新采集。GET 优先返回缓存，初次缓存尚未建立时才同步采集；前端不通过定时 REST 请求维持监控，而是接收 WS 推送。进程默认按资源占用降序，点击 CPU 或内存表头可切换升序/降序。
+
+网卡使用独立采样链路，不等待 CPU、磁盘和进程等整组资源采集。Linux/macOS 每秒读取累计字节数，以相邻两次成功采样的差值除以跨过的整数秒数；失败或 900ms 超时的秒槽推送 0，不推进累计值基线，之后成功时按实际跨过的秒数求平均，且不回填之前的失败秒。Windows 通过持续运行的 `typeperf` 通道直接读取系统每秒速率，连续样本按序号分配逐秒时间槽，避免进程启动耗时和网络到达抖动破坏周期；启动、中断和恢复期间缺秒补 0。网络样本通过独立 WS `network` 帧携带本机 Unix 秒级时间戳，普通 `metrics` 帧和 REST 快照只附带最近一次网络结果，不重复驱动图表。
+
+后端按名称排序网卡；前端自动模式保持当前活动网卡，也可按接口名手动切换并立即刷新。网络图以中间横线为零轴，红色上行柱向上、绿色下行柱向下，图表高度、柱宽和间距固定。每根柱严格按时间戳表示一秒，同一秒覆盖、缺秒补 0、窗口内迟到样本按原时间回填，不做插值。每个 Session 的每张网卡分别根据最近 40 秒的上下行样本计算共用滚动刻度，峰值进入或离开窗口时，上传和下载柱统一重绘；图下显示起止时刻，悬停柱子显示该秒时间和速率。
 
 后端通过 `uname -s` 区分 Linux、macOS（Darwin）和 Windows。macOS 监控使用系统自带 `top`、`vm_stat`、`vm.swapusage`、`netstat`、`df` 和 `ps`，无需安装远端依赖。
 
@@ -256,7 +261,8 @@ WS /ws/terminal?sessionId=s_xxx&ticket=short-lived-one-time-value
 { "type": "status", "status": "reconnecting" }
 { "type": "exit", "code": 0 }
 { "type": "error", "message": "Connection closed by remote host" }
-{ "type": "metrics", "metrics": { "system": {}, "cpuPercent": 1.2, "memory": {}, "interfaces": [], "disks": [] }
+{ "type": "network", "network": { "timestamp": 1794468642, "interfaces": [{ "name": "eth4", "rxBytesPerSecond": 9000, "txBytesPerSecond": 1000 }] } }
+{ "type": "metrics", "metrics": { "system": {}, "cpuPercent": 1.2, "memory": {}, "interfaces": [], "disks": [] } }
 ```
 
 `disconnected` 仅表示远程 SSH 连接失效，不代表本地 WebSocket 断开。`exit` 表示远程 shell 正常退出或逻辑会话结束，不用于普通的网络断线。

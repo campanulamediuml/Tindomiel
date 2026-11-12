@@ -1,12 +1,41 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
+import type { IRenderDimensions, IRenderer } from '@xterm/xterm/src/browser/renderer/shared/Types';
 import type { Api } from './api';
 import { encodeShortcut, shortcutFromEvent } from './shortcuts';
 import { terminalThemes } from './terminal-themes';
-import type { AppSettings, DisplayStatus, ResourceMetrics, SessionInfo, SessionStatus, ShortcutMapping, TransferState } from './types';
+import type { AppSettings, DisplayStatus, NetworkMetrics, ResourceMetrics, SessionInfo, SessionStatus, ShortcutMapping, TransferState } from './types';
 
 const encoder = new TextEncoder();
+const webglReleaseDelay = 30_000;
+
+type TerminalCoreWithRenderer = {
+  _renderService: {
+    readonly dimensions: IRenderDimensions;
+    setRenderer(renderer: IRenderer): void;
+    handleResize(cols: number, rows: number): void;
+  };
+  _createRenderer(): IRenderer;
+};
+
+class InactiveRenderer implements IRenderer {
+  readonly onRequestRedraw: IRenderer['onRequestRedraw'] = () => ({ dispose: () => undefined });
+
+  constructor(readonly dimensions: IRenderDimensions) {}
+
+  dispose(): void {}
+  handleDevicePixelRatioChange(): void {}
+  handleResize(_cols: number, _rows: number): void {}
+  handleCharSizeChanged(): void {}
+  handleBlur(): void {}
+  handleFocus(): void {}
+  handleSelectionChanged(_start: [number, number] | undefined, _end: [number, number] | undefined, _columnSelectMode: boolean): void {}
+  handleCursorMove(): void {}
+  clear(): void {}
+  renderRows(_start: number, _end: number): void {}
+  clearTextureAtlas(): void {}
+}
 
 export class TerminalView {
   readonly element = document.createElement('div');
@@ -16,6 +45,8 @@ export class TerminalView {
   private readonly fitAddon = new FitAddon();
   private readonly resizeObserver: ResizeObserver;
   private websocket?: WebSocket;
+  private webgl?: WebglAddon;
+  private webglReleaseTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
   private resizeFrame = 0;
   private readonly shortcutMap: Map<string, string>;
@@ -26,6 +57,7 @@ export class TerminalView {
     private readonly onStatus: (status: DisplayStatus) => void,
     private readonly onError: (message: string) => void,
     private readonly onTransfer: (transfer: TransferState) => void,
+    private readonly onNetwork: (metrics: NetworkMetrics) => void,
     private readonly onMetrics: (metrics: ResourceMetrics) => void,
     private readonly onCwd: (path: string) => void,
     settings: AppSettings,
@@ -45,13 +77,7 @@ export class TerminalView {
     });
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.open(this.element);
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      this.terminal.loadAddon(webgl);
-    } catch {
-      this.onError('WebGL 不可用，已使用 xterm 普通渲染模式');
-    }
+    this.restoreWebgl();
     this.terminal.onData((data) => this.sendInput(encoder.encode(data)));
     this.terminal.onBinary((data) => {
       const bytes = new Uint8Array(data.length);
@@ -105,7 +131,7 @@ export class TerminalView {
         this.terminal.write(new Uint8Array(event.data as ArrayBuffer));
         return;
       }
-      const control = JSON.parse(event.data) as { type: string; status?: SessionStatus; message?: string; transfer?: TransferState; metrics?: ResourceMetrics; path?: string };
+      const control = JSON.parse(event.data) as { type: string; status?: SessionStatus; message?: string; transfer?: TransferState; network?: NetworkMetrics; metrics?: ResourceMetrics; path?: string };
       if (control.type === 'status' && control.status) {
         this.setStatus(control.status);
       } else if (control.type === 'exit') {
@@ -114,6 +140,8 @@ export class TerminalView {
         this.onError(control.message ?? '终端错误');
       } else if (control.type === 'transfer' && control.transfer) {
         this.onTransfer(control.transfer);
+      } else if (control.type === 'network' && control.network) {
+        this.onNetwork(control.network);
       } else if (control.type === 'metrics' && control.metrics) {
         this.onMetrics(control.metrics);
       } else if (control.type === 'cwd' && control.path) {
@@ -129,14 +157,20 @@ export class TerminalView {
   }
 
   activate(): void {
+    if (this.disposed) return;
+    this.cancelWebglRelease();
     this.element.hidden = false;
+    this.restoreWebgl();
     this.terminal.scrollToBottom();
     this.scheduleFit();
     this.terminal.focus();
   }
 
   deactivate(): void {
+    if (this.disposed) return;
     this.element.hidden = true;
+    if (!this.webgl || this.webglReleaseTimer !== undefined) return;
+    this.webglReleaseTimer = setTimeout(() => this.releaseWebgl(), webglReleaseDelay);
   }
 
   focus(): void {
@@ -173,15 +207,67 @@ export class TerminalView {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.cancelWebglRelease();
     cancelAnimationFrame(this.resizeFrame);
     this.resizeObserver.disconnect();
     this.websocket?.close();
     try {
+      this.releaseWebgl();
       this.terminal.dispose();
     } finally {
       this.element.remove();
     }
+  }
+
+  private restoreWebgl(): void {
+    if (this.disposed || this.webgl) return;
+    try {
+      const webgl = new WebglAddon();
+      this.webgl = webgl;
+      webgl.onContextLoss(() => {
+        if (this.webgl === webgl) this.releaseWebgl();
+      });
+      this.terminal.loadAddon(webgl);
+    } catch {
+      this.releaseWebgl(false);
+      if (!this.element.hidden && !this.disposed) this.installDomRenderer();
+      this.onError('WebGL 不可用，已使用 xterm 普通渲染模式');
+    }
+  }
+
+  private releaseWebgl(useDomFallback = true): void {
+    this.cancelWebglRelease();
+    const webgl = this.webgl;
+    this.webgl = undefined;
+    const core = (this.terminal as Terminal & { _core: TerminalCoreWithRenderer })._core;
+    const keepRenderer = useDomFallback && !this.element.hidden && !this.disposed;
+    const inactiveRenderer = keepRenderer ? undefined : new InactiveRenderer(core._renderService.dimensions);
+    const createRenderer = core._createRenderer;
+    if (inactiveRenderer) core._createRenderer = () => inactiveRenderer;
+    try {
+      webgl?.dispose();
+    } catch {
+      if (keepRenderer) this.installDomRenderer();
+    } finally {
+      if (inactiveRenderer) {
+        core._createRenderer = createRenderer;
+        core._renderService.setRenderer(inactiveRenderer);
+      }
+    }
+  }
+
+  private installDomRenderer(): void {
+    const core = (this.terminal as Terminal & { _core: TerminalCoreWithRenderer })._core;
+    core._renderService.setRenderer(core._createRenderer());
+    core._renderService.handleResize(this.terminal.cols, this.terminal.rows);
+  }
+
+  private cancelWebglRelease(): void {
+    if (this.webglReleaseTimer === undefined) return;
+    clearTimeout(this.webglReleaseTimer);
+    this.webglReleaseTimer = undefined;
   }
 
   private sendInput(data: Uint8Array): void {

@@ -21,6 +21,10 @@ interface BenchmarkResult {
   heapAfter?: number;
   reconnectStartsAtColumnZero: boolean;
   reconnectLineBreakCount: number;
+  hiddenWebglReleasedWithoutDom: boolean;
+  webglFallbackWorks: boolean;
+  webglRestored: boolean;
+  hiddenOutputPreserved: boolean;
   processRowsReused: boolean;
   transferRowsReused: boolean;
   fileDatesMatch: boolean;
@@ -36,6 +40,7 @@ async function installWorkspace(): Promise<void> {
 
 function sampleMetrics(): ResourceMetrics {
   return {
+    timestamp: Math.floor(Date.now() / 1000),
     system: { hostname: 'benchmark', osName: 'Linux', kernelVersion: '1', architecture: 'arm64', cpuModel: 'CPU', cpuCores: 8 },
     uptimeSeconds: 1000,
     loadAverage: [1, 2, 3],
@@ -64,7 +69,7 @@ function median(values: number[]): number {
   return [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)] ?? 0;
 }
 
-async function terminalReconnectCheck(): Promise<{ startsAtZero: boolean; breaks: number }> {
+async function terminalReconnectCheck(): Promise<{ startsAtZero: boolean; breaks: number; hiddenReleased: boolean; fallback: boolean; restored: boolean; hiddenOutput: boolean }> {
   const sockets: { onmessage: ((event: MessageEvent) => void) | null }[] = [];
   class MockWebSocket {
     onmessage: ((event: MessageEvent) => void) | null = null;
@@ -78,7 +83,7 @@ async function terminalReconnectCheck(): Promise<{ startsAtZero: boolean; breaks
   Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockWebSocket });
   const session: SessionInfo = { sessionId: 'benchmark', profileId: 'benchmark', status: 'ready', openedAt: 0 };
   const api = { terminalUrl: async () => 'ws://127.0.0.1/benchmark' };
-  const view = new TerminalView(session, api as never, () => undefined, () => undefined, () => undefined, () => undefined, () => undefined, { theme: 'homebrew', fontSize: 13, cursorBlink: true, scrollback: 10_000, downloadDirectory: '', shortcuts: [] });
+  const view = new TerminalView(session, api as never, () => undefined, () => undefined, () => undefined, () => undefined, () => undefined, () => undefined, { theme: 'homebrew', fontSize: 13, cursorBlink: true, scrollback: 10_000, downloadDirectory: '', shortcuts: [] });
   document.getElementById('terminal-area')?.append(view.element);
   view.status = 'disconnected';
   await view.connect();
@@ -90,7 +95,17 @@ async function terminalReconnectCheck(): Promise<{ startsAtZero: boolean; breaks
   await new Promise<void>((resolve) => view.terminal.write('Welcome to Ubuntu', resolve));
   const welcomeLine = view.terminal.buffer.active.getLine(before + 1)?.translateToString(true) ?? '';
   const breaks = view.terminal.buffer.active.cursorY - before;
-  const result = { startsAtZero: welcomeLine.startsWith('Welcome to Ubuntu'), breaks };
+  view.deactivate();
+  (view as unknown as { releaseWebgl(): void }).releaseWebgl();
+  const hiddenReleased = view.element.querySelector('.xterm-screen .xterm-rows') === null && view.element.querySelector('.xterm-screen canvas') === null;
+  (view.terminal as unknown as { _core: { writeSync(data: string): void } })._core.writeSync('\r\nhidden-output');
+  view.activate();
+  const restored = view.element.querySelector('.xterm-screen canvas') !== null;
+  const buffer = view.terminal.buffer.active;
+  const hiddenOutput = buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true).includes('hidden-output') ?? false;
+  (view as unknown as { releaseWebgl(): void }).releaseWebgl();
+  const fallback = view.element.querySelector('.xterm-screen .xterm-rows') !== null && view.element.querySelector('.xterm-screen canvas') === null;
+  const result = { startsAtZero: welcomeLine.startsWith('Welcome to Ubuntu'), breaks, hiddenReleased, fallback, restored, hiddenOutput };
   try {
     view.dispose();
   } catch {
@@ -163,6 +178,10 @@ async function run(): Promise<void> {
     heapAfter: heap?.usedJSHeapSize,
     reconnectStartsAtColumnZero: reconnect.startsAtZero,
     reconnectLineBreakCount: reconnect.breaks,
+    hiddenWebglReleasedWithoutDom: reconnect.hiddenReleased,
+    webglFallbackWorks: reconnect.fallback,
+    webglRestored: reconnect.restored,
+    hiddenOutputPreserved: reconnect.hiddenOutput,
     processRowsReused: firstProcessRow !== null && firstProcessRow === document.querySelector('#process-list .process-row'),
     transferRowsReused: firstTransferRow !== null && firstTransferRow === document.querySelector('#global-transfer-list .transfer-row'),
     fileDatesMatch: firstFileDate === expectedFileDate,

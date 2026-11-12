@@ -181,6 +181,9 @@ type Session struct {
 	reconnectActive bool
 	pending         []byte
 	metrics         metricsState
+	network         networkMonitorState
+	execCommand     func(context.Context, string) ([]byte, error)
+	pingFunc        func(context.Context) float64
 	editors         *editorManager
 	cwd             string
 

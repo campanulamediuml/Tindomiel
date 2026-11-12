@@ -5,6 +5,8 @@ import { element, joinPath, messageOf } from './utils';
 interface TreeNode {
   children?: FileEntry[];
   loading: boolean;
+  request: number;
+  error?: string;
 }
 
 interface TreeSnapshot {
@@ -15,9 +17,7 @@ interface TreeSnapshot {
 
 export class RemoteTree {
   private sessionId?: string;
-  private currentPath = '/';
-  private expanded = new Set<string>(['/']);
-  private nodes = new Map<string, TreeNode>();
+  private state?: TreeSnapshot;
   private readonly snapshots = new Map<string, TreeSnapshot>();
   private readonly container = element<HTMLDivElement>('remote-tree');
 
@@ -30,80 +30,81 @@ export class RemoteTree {
   }
 
   async setSession(sessionId?: string): Promise<void> {
-    if (this.sessionId) this.snapshots.set(this.sessionId, { expanded: this.expanded, nodes: this.nodes, currentPath: this.currentPath });
     this.sessionId = sessionId;
-    const cached = sessionId ? this.snapshots.get(sessionId) : undefined;
-    if (cached) {
-      this.expanded = new Set(cached.expanded);
-      this.nodes = new Map(cached.nodes);
-      this.currentPath = cached.currentPath;
-      this.container.replaceChildren();
+    if (!sessionId) {
+      this.state = undefined;
       this.render();
       return;
     }
-    this.expanded = new Set(['/']);
-    this.nodes = new Map();
-    this.currentPath = '/';
-    this.container.replaceChildren();
-    if (sessionId) await this.load('/');
+    let state = this.snapshots.get(sessionId);
+    const isNew = !state;
+    if (!state) {
+      state = { expanded: new Set(['/']), nodes: new Map(), currentPath: '/' };
+      this.snapshots.set(sessionId, state);
+    }
+    this.state = state;
     this.render();
+    if (isNew) {
+      void this.load('/', sessionId, state).then(() => {
+        if (this.sessionId === sessionId && this.state === state) this.render();
+      });
+    }
   }
 
-  setDirectory(path: string, entries: FileEntry[]): void {
-    const node = this.nodes.get(path) ?? { loading: false };
+  setDirectory(sessionId: string, path: string, entries: FileEntry[]): void {
+    const state = this.snapshots.get(sessionId);
+    if (!state) return;
+    const node = state.nodes.get(path) ?? { loading: false, request: 0 };
     node.children = entries.filter((entry) => entry.type === 'directory');
     node.loading = false;
-    this.nodes.set(path, node);
+    node.error = undefined;
+    node.request += 1;
+    state.nodes.set(path, node);
   }
 
   setCurrent(path: string): void {
-    const sessionId = this.sessionId;
-    this.currentPath = path;
-    const parts = path.split('/');
-    let current = '';
-    for (const part of parts) {
-      if (!part) continue;
-      current += `/${part}`;
-      this.expanded.add(current);
-      const node = this.nodes.get(current);
-      if (!node?.children && !node?.loading) {
-        void this.load(current).then(() => {
-          if (this.sessionId === sessionId && this.currentPath === path) this.render();
-        });
-      }
-    }
+    if (!this.state) return;
+    this.state.currentPath = path;
     this.render();
   }
 
   async refresh(): Promise<void> {
-    this.nodes.clear();
-    if (this.sessionId) {
-      await Promise.all(Array.from(this.expanded, (path) => this.load(path)));
-    }
+    const sessionId = this.sessionId;
+    const state = this.state;
+    if (!sessionId || !state) return;
+    state.nodes.clear();
     this.render();
+    await Promise.all(Array.from(state.expanded, (path) => this.load(path, sessionId, state)));
+    if (this.sessionId === sessionId && this.state === state) this.render();
   }
 
-  private async load(path: string): Promise<void> {
-    const sessionId = this.sessionId;
-    if (!sessionId) return;
-    const nodes = this.nodes;
-    const node = nodes.get(path) ?? { loading: false };
+  private async load(path: string, sessionId = this.sessionId, state = this.state): Promise<void> {
+    if (!sessionId || !state) return;
+    const node = state.nodes.get(path) ?? { loading: false, request: 0 };
+    const request = node.request + 1;
+    node.request = request;
     node.loading = true;
-    nodes.set(path, node);
+    node.error = undefined;
+    state.nodes.set(path, node);
+    const isCurrentRequest = () => this.snapshots.get(sessionId) === state
+      && state.nodes.get(path) === node
+      && node.request === request;
     try {
       const entries = await this.api.listFiles(sessionId, path);
+      if (!isCurrentRequest()) return;
       node.children = entries.filter((entry) => entry.type === 'directory');
     } catch (error) {
-      node.children = [];
-      this.onError(`${path}：${messageOf(error)}`);
+      if (!isCurrentRequest()) return;
+      node.error = messageOf(error);
+      if (this.sessionId === sessionId && this.state === state) this.onError(`${path}：${node.error}`);
     } finally {
-      node.loading = false;
+      if (isCurrentRequest()) node.loading = false;
     }
   }
 
   private render(): void {
     this.container.replaceChildren();
-    if (!this.sessionId) {
+    if (!this.sessionId || !this.state) {
       this.container.textContent = '连接后显示远程目录';
       return;
     }
@@ -111,12 +112,16 @@ export class RemoteTree {
   }
 
   private renderNode(path: string, name: string, depth: number): void {
+    const state = this.state!;
+    const node = state.nodes.get(path);
     const row = document.createElement('div');
-    row.className = `tree-row ${this.currentPath === path ? 'selected' : ''}`;
+    const unloaded = !node?.children;
+    row.className = `tree-row ${state.currentPath === path ? 'selected' : ''} ${unloaded ? 'unloaded' : ''}`;
     row.style.paddingLeft = `${6 + depth * 14}px`;
     const toggle = document.createElement('button');
     toggle.className = 'tree-toggle';
-    toggle.textContent = this.expanded.has(path) ? '▾' : '▸';
+    toggle.textContent = node?.loading ? '…' : state.expanded.has(path) ? '▾' : '▸';
+    toggle.title = node?.loading ? '正在后台加载' : unloaded ? '点击加载子目录' : '展开或折叠';
     toggle.addEventListener('click', () => void this.toggle(path));
     const label = document.createElement('button');
     label.className = 'tree-label';
@@ -125,26 +130,28 @@ export class RemoteTree {
     label.addEventListener('click', () => this.onSelect(path));
     row.append(toggle, label);
     this.container.append(row);
-    if (!this.expanded.has(path)) return;
-    const node = this.nodes.get(path);
-    if (node?.loading) {
-      const loading = document.createElement('div');
-      loading.className = 'tree-message';
-      loading.style.paddingLeft = `${26 + depth * 14}px`;
-      loading.textContent = '读取中…';
-      this.container.append(loading);
+    if (!state.expanded.has(path)) return;
+    if (node?.loading || node?.error) {
+      const message = document.createElement('div');
+      message.className = 'tree-message';
+      message.style.paddingLeft = `${26 + depth * 14}px`;
+      message.textContent = node.loading ? '读取中…' : '加载失败，折叠后重新展开可重试';
+      this.container.append(message);
       return;
     }
     for (const child of node?.children ?? []) this.renderNode(joinPath(path, child.name), child.name, depth + 1);
   }
 
   private async toggle(path: string): Promise<void> {
-    if (this.expanded.has(path)) {
-      this.expanded.delete(path);
-    } else {
-      this.expanded.add(path);
-      if (!this.nodes.get(path)?.children) await this.load(path);
-    }
+    const sessionId = this.sessionId;
+    const state = this.state;
+    if (!sessionId || !state) return;
+    const expanding = !state.expanded.has(path);
+    if (expanding) state.expanded.add(path);
+    else state.expanded.delete(path);
     this.render();
+    const node = state.nodes.get(path);
+    if (expanding && !node?.children && !node?.loading) await this.load(path, sessionId, state);
+    if (this.sessionId === sessionId && this.state === state) this.render();
   }
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,7 @@ type SystemMetrics struct {
 }
 
 type ResourceMetrics struct {
+	Timestamp     int64              `json:"timestamp"`
 	System        SystemMetrics      `json:"system"`
 	UptimeSeconds float64            `json:"uptimeSeconds"`
 	LoadAverage   []float64          `json:"loadAverage"`
@@ -73,21 +75,31 @@ type networkSample struct {
 	tx uint64
 }
 
+type staticMetrics struct {
+	generation  uint64
+	system      SystemMetrics
+	memoryTotal uint64
+	swapTotal   uint64
+}
+
 type metricsState struct {
 	mu               sync.Mutex
 	os               string
+	osGeneration     uint64
 	windowsCollector string
+	static           *staticMetrics
 	cpuTotal         uint64
 	cpuIdle          uint64
-	network          map[string]networkSample
-	sampledAt        time.Time
 	latest           *ResourceMetrics
 }
 
 func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
 	s.metrics.mu.Lock()
 	defer s.metrics.mu.Unlock()
-	if s.metrics.os == "" {
+	s.mu.RLock()
+	generation := s.generation
+	s.mu.RUnlock()
+	if s.metrics.os == "" || s.metrics.osGeneration != generation {
 		ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		output, err := s.exec(ctx, "uname -s")
 		cancel()
@@ -100,6 +112,7 @@ func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
 		default:
 			s.metrics.os = "windows"
 		}
+		s.metrics.osGeneration = generation
 	}
 	var (
 		result ResourceMetrics
@@ -107,18 +120,41 @@ func (s *Session) Metrics(ctx context.Context) (ResourceMetrics, error) {
 	)
 	switch s.metrics.os {
 	case "linux":
-		result, err = s.linuxMetrics(ctx)
+		result, err = s.linuxMetrics(ctx, generation)
 	case "darwin":
-		result, err = s.darwinMetrics(ctx)
+		result, err = s.darwinMetrics(ctx, generation)
 	default:
-		result, err = s.windowsMetrics(ctx)
+		result, err = s.windowsMetrics(ctx, generation)
 	}
 	if err != nil {
 		return ResourceMetrics{}, err
 	}
+	result.Interfaces = s.currentNetworkInterfaces()
+	s.cacheStaticMetrics(generation, result)
+	result.Timestamp = time.Now().Unix()
 	result.PingMs = s.ping(ctx)
 	s.metrics.latest = &result
 	return result, nil
+}
+
+func (s *Session) cachedStaticMetrics(generation uint64) (staticMetrics, bool) {
+	if s.metrics.static == nil || s.metrics.static.generation != generation {
+		return staticMetrics{}, false
+	}
+	return *s.metrics.static, true
+}
+
+func (s *Session) cacheStaticMetrics(generation uint64, result ResourceMetrics) {
+	system := result.System
+	if system.Hostname == "" || system.OSName == "" || system.KernelVersion == "" || system.Architecture == "" || system.CPUModel == "" || system.CPUCores <= 0 {
+		return
+	}
+	s.metrics.static = &staticMetrics{
+		generation:  generation,
+		system:      system,
+		memoryTotal: result.Memory.Total,
+		swapTotal:   result.Swap.Total,
+	}
 }
 
 func (s *Session) CachedMetrics() (ResourceMetrics, bool) {
@@ -127,18 +163,28 @@ func (s *Session) CachedMetrics() (ResourceMetrics, bool) {
 	if s.metrics.latest == nil {
 		return ResourceMetrics{}, false
 	}
-	return *s.metrics.latest, true
+	result := *s.metrics.latest
+	result.Interfaces = s.currentNetworkInterfaces()
+	return result, true
 }
 
-func (s *Session) linuxMetrics(ctx context.Context) (ResourceMetrics, error) {
+func (s *Session) linuxMetrics(ctx context.Context, generation uint64) (ResourceMetrics, error) {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	output, err := s.exec(ctx, `echo __UPTIME__; cat /proc/uptime; cat /proc/loadavg; echo __SYSTEM__; hostname; uname -r; uname -m; nproc; cat /etc/os-release; echo __CPUINFO__; head -n 30 /proc/cpuinfo; echo __CPU__; head -n 1 /proc/stat; echo __MEM__; cat /proc/meminfo; echo __NET__; cat /proc/net/dev; echo __DISK__; df -P -B1 -x tmpfs -x devtmpfs; echo __PROC__; ps -eo pid=,pcpu=,rss=,args=`)
+	static, cached := s.cachedStaticMetrics(generation)
+	command := `echo __UPTIME__; cat /proc/uptime; cat /proc/loadavg; echo __SYSTEM__; hostname; uname -r; uname -m; nproc; cat /etc/os-release; echo __CPUINFO__; head -n 30 /proc/cpuinfo; echo __CPU__; head -n 1 /proc/stat; echo __MEM__; cat /proc/meminfo; echo __DISK__; df -P -B1 -x tmpfs -x devtmpfs; echo __PROC__; ps -eo pid=,pcpu=,rss=,args=`
+	if cached {
+		command = `echo __UPTIME__; cat /proc/uptime; cat /proc/loadavg; echo __CPU__; head -n 1 /proc/stat; echo __MEM__; cat /proc/meminfo; echo __DISK__; df -P -B1 -x tmpfs -x devtmpfs; echo __PROC__; ps -eo pid=,pcpu=,rss=,args=`
+	}
+	output, err := s.exec(ctx, command)
 	if err != nil {
 		return ResourceMetrics{}, fmt.Errorf("read Linux metrics: %w", err)
 	}
 	sections := splitSections(string(output))
-	result := ResourceMetrics{System: parseLinuxSystem(sections["SYSTEM"], sections["CPUINFO"]), LoadAverage: []float64{}}
+	result := ResourceMetrics{System: static.system, LoadAverage: []float64{}}
+	if !cached {
+		result.System = parseLinuxSystem(sections["SYSTEM"], sections["CPUINFO"])
+	}
 	uptimeLines := strings.Split(strings.TrimSpace(sections["UPTIME"]), "\n")
 	if fields := strings.Fields(uptimeLines[0]); len(fields) > 0 {
 		result.UptimeSeconds, _ = strconv.ParseFloat(fields[0], 64)
@@ -179,23 +225,29 @@ func (s *Session) linuxMetrics(ctx context.Context) (ResourceMetrics, error) {
 	result.Memory = MemoryMetrics{Total: total, Used: used, Available: available, UsedPercent: percentage(used, total)}
 	swapUsed := subtract(memory["SwapTotal"], memory["SwapFree"])
 	result.Swap = SwapMetrics{Total: memory["SwapTotal"], Used: swapUsed, UsedPercent: percentage(swapUsed, memory["SwapTotal"])}
-	result.Interfaces = s.networkRates(parseLinuxNetwork(sections["NET"]))
 	result.Disks = parseDF(sections["DISK"])
 	result.Processes = parseProcesses(sections["PROC"])
 	return result, nil
 }
 
-func (s *Session) windowsMetrics(ctx context.Context) (ResourceMetrics, error) {
+func (s *Session) windowsMetrics(ctx context.Context, generation uint64) (ResourceMetrics, error) {
 	if s.metrics.windowsCollector == "cmd" {
-		return s.cmdMetrics(ctx)
+		return s.cmdMetrics(ctx, generation)
+	}
+	static, cached := s.cachedStaticMetrics(generation)
+	systemQuery := `$os=Get-CimInstance Win32_OperatingSystem;`
+	processorQuery := `$cpuInfo=Get-CimInstance Win32_Processor|Select-Object -First 1 Name,NumberOfLogicalProcessors;` +
+		`$computer=Get-CimInstance Win32_ComputerSystem;`
+	systemOutput := `"SYS|$env:COMPUTERNAME|$($os.Caption)|$($os.Version)|$env:PROCESSOR_ARCHITECTURE|$($cpuInfo.Name)|$($computer.NumberOfLogicalProcessors)";`
+	if cached {
+		processorQuery = ""
+		systemOutput = ""
 	}
 	script := `[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);` +
-		`$os=Get-CimInstance Win32_OperatingSystem;` +
+		systemQuery +
 		`$cpu=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average;` +
-		`$cpuInfo=Get-CimInstance Win32_Processor|Select-Object -First 1 Name,NumberOfLogicalProcessors;` +
-		`$computer=Get-CimInstance Win32_ComputerSystem;` +
+		processorQuery +
 		`$p=Get-CimInstance Win32_PerfFormattedData_PerfProc_Process|Where-Object {$_.Name -ne '_Total' -and $_.Name -ne 'Idle'}|Select-Object IDProcess,PercentProcessorTime,WorkingSetPrivate,Name;` +
-		`$n=Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface|Select-Object Name,BytesReceivedPersec,BytesSentPersec;` +
 		`$d=Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3'|Select-Object DeviceID,Size,FreeSpace;` +
 		`$pageFiles=Get-CimInstance Win32_PageFileUsage;` +
 		`$swapTotal=($pageFiles|Measure-Object AllocatedBaseSize -Sum).Sum*1MB;` +
@@ -203,23 +255,25 @@ func (s *Session) windowsMetrics(ctx context.Context) (ResourceMetrics, error) {
 		`$uptime=((Get-Date)-$os.LastBootUpTime).TotalSeconds;` +
 		`$memoryTotal=$os.TotalVisibleMemorySize*1024;` +
 		`$memoryAvailable=$os.FreePhysicalMemory*1024;` +
-		`"SYS|$env:COMPUTERNAME|$($os.Caption)|$($os.Version)|$env:PROCESSOR_ARCHITECTURE|$($cpuInfo.Name)|$($computer.NumberOfLogicalProcessors)";` +
+		systemOutput +
 		`"CPU|$cpu";"UPTIME|$uptime";"MEM|$memoryTotal|$memoryAvailable";"SWAP|$swapTotal|$swapUsed";` +
 		`$p | ForEach-Object { "PROC|$($_.IDProcess)|$($_.PercentProcessorTime)|$($_.WorkingSetPrivate)|$($_.Name)" };` +
-		`$n | ForEach-Object { "NET|$($_.Name)|$($_.BytesReceivedPersec)|$($_.BytesSentPersec)" };` +
 		`$d | ForEach-Object { "DISK|$($_.DeviceID)|$($_.Size)|$($_.FreeSpace)" }`
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	output, powerShellErr := s.exec(ctx, powershellCommand(script))
 	if powerShellErr == nil {
 		result := parseWindowsTextMetrics(output)
+		if cached {
+			result.System = static.system
+		}
 		if result.System.OSName != "" && result.Memory.Total > 0 && len(result.Processes) > 0 {
 			s.metrics.windowsCollector = "powershell"
 			return result, nil
 		}
 		powerShellErr = fmt.Errorf("PowerShell returned incomplete metrics")
 	}
-	result, cmdErr := s.cmdMetrics(ctx)
+	result, cmdErr := s.cmdMetrics(ctx, generation)
 	if cmdErr != nil {
 		return ResourceMetrics{}, fmt.Errorf("PowerShell metrics: %v; cmd metrics: %w", powerShellErr, cmdErr)
 	}
@@ -280,6 +334,7 @@ func parseWindowsTextMetrics(output []byte) ResourceMetrics {
 			}
 		}
 	}
+	sort.Slice(result.Interfaces, func(i, j int) bool { return result.Interfaces[i].Name < result.Interfaces[j].Name })
 	return result
 }
 
@@ -289,6 +344,9 @@ func parseUintText(value string) uint64 {
 }
 
 func (s *Session) exec(ctx context.Context, command string) ([]byte, error) {
+	if s.execCommand != nil {
+		return s.execCommand(ctx, command)
+	}
 	client, err := s.Client()
 	if err != nil {
 		return nil, err
@@ -338,6 +396,9 @@ func (s *Session) exec(ctx context.Context, command string) ([]byte, error) {
 }
 
 func (s *Session) ping(ctx context.Context) float64 {
+	if s.pingFunc != nil {
+		return s.pingFunc(ctx)
+	}
 	s.mu.RLock()
 	host := s.profile.Options.Host
 	s.mu.RUnlock()
@@ -355,24 +416,6 @@ func (s *Session) ping(ctx context.Context) float64 {
 	value = strings.TrimSpace(strings.TrimSuffix(value, "ms"))
 	milliseconds, _ := strconv.ParseFloat(value, 64)
 	return milliseconds
-}
-
-func (s *Session) networkRates(current map[string]networkSample) []InterfaceMetrics {
-	now := time.Now()
-	elapsed := now.Sub(s.metrics.sampledAt).Seconds()
-	result := make([]InterfaceMetrics, 0, len(current))
-	for name, sample := range current {
-		var rxRate, txRate float64
-		previous, ok := s.metrics.network[name]
-		if ok && elapsed > 0 && sample.rx >= previous.rx && sample.tx >= previous.tx {
-			rxRate = float64(sample.rx-previous.rx) / elapsed
-			txRate = float64(sample.tx-previous.tx) / elapsed
-		}
-		result = append(result, InterfaceMetrics{Name: name, RxBytesPerSecond: rxRate, TxBytesPerSecond: txRate})
-	}
-	s.metrics.network = current
-	s.metrics.sampledAt = now
-	return result
 }
 
 func splitSections(output string) map[string]string {

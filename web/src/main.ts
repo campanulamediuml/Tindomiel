@@ -261,6 +261,7 @@ async function connect(profile: Profile, insertAfter?: string): Promise<void> {
     (status) => updateStatus(session.sessionId, status),
     showToast,
     (transfer) => transfers.update(transfer),
+    (snapshot) => metrics.receiveNetwork(session.sessionId, snapshot),
     (snapshot) => metrics.receive(session.sessionId, snapshot),
     (path) => {
       if (activeId === session.sessionId) void sftp.load(path).catch((error) => showToast(messageOf(error)));

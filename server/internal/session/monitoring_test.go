@@ -61,6 +61,27 @@ func TestParseDarwinNetworkAndDisks(t *testing.T) {
 	}
 }
 
+func TestNetworkInterfacesAreSortedByName(t *testing.T) {
+	rates := calculateNetworkRates(map[string]networkSample{
+		"eth1": {rx: 1, tx: 2},
+		"eth0": {rx: 3, tx: 4},
+	}, nil, time.Time{}, time.Unix(1000, 0))
+	if len(rates) != 2 || rates[0].Name != "eth0" || rates[1].Name != "eth1" {
+		t.Fatalf("unexpected network order: %#v", rates)
+	}
+	windows := parseCmdInterfaces(map[windowsCounter]float64{
+		{object: "Network Interface", instance: "Wi-Fi", counter: "Bytes Received/sec"}:    1,
+		{object: "Network Interface", instance: "Ethernet", counter: "Bytes Received/sec"}: 2,
+	})
+	if len(windows) != 2 || windows[0].Name != "Ethernet" || windows[1].Name != "Wi-Fi" {
+		t.Fatalf("unexpected Windows network order: %#v", windows)
+	}
+	powerShell := parseWindowsTextMetrics([]byte("NET|Wi-Fi|1|2\r\nNET|Ethernet|3|4\r\n"))
+	if len(powerShell.Interfaces) != 2 || powerShell.Interfaces[0].Name != "Ethernet" || powerShell.Interfaces[1].Name != "Wi-Fi" {
+		t.Fatalf("unexpected PowerShell network order: %#v", powerShell.Interfaces)
+	}
+}
+
 func TestParseWindowsCounters(t *testing.T) {
 	tests := []struct {
 		header   string
