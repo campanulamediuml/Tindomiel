@@ -29,12 +29,14 @@ import (
 )
 
 type Server struct {
-	token    string
-	profiles *configstore.Store
-	manager  *session.Manager
-	hostKeys *sshconn.HostKeys
-	static   http.Handler
-	logPath  string
+	token           string
+	profiles        *configstore.Store
+	manager         *session.Manager
+	hostKeys        *sshconn.HostKeys
+	static          http.Handler
+	logPath         string
+	frontendLogPath string
+	frontendLogger  *slog.Logger
 
 	ticketMu sync.Mutex
 	tickets  map[string]ticket
@@ -46,8 +48,8 @@ type ticket struct {
 	expiresAt time.Time
 }
 
-func New(token, staticDir string, profiles *configstore.Store, manager *session.Manager, hostKeys *sshconn.HostKeys, logPath string) *Server {
-	server := &Server{token: token, profiles: profiles, manager: manager, hostKeys: hostKeys, logPath: logPath, tickets: make(map[string]ticket)}
+func New(token, staticDir string, profiles *configstore.Store, manager *session.Manager, hostKeys *sshconn.HostKeys, logPath, frontendLogPath string, frontendLogger *slog.Logger) *Server {
+	server := &Server{token: token, profiles: profiles, manager: manager, hostKeys: hostKeys, logPath: logPath, frontendLogPath: frontendLogPath, frontendLogger: frontendLogger, tickets: make(map[string]ticket)}
 	if staticDir != "" {
 		server.static = http.FileServer(http.Dir(staticDir))
 	}
@@ -58,6 +60,8 @@ func (s *Server) Handler() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /api/health", s.health)
 	api.HandleFunc("GET /api/logs/recent", s.recentLogs)
+	api.HandleFunc("GET /api/logs/frontend/recent", s.recentFrontendLogs)
+	api.HandleFunc("POST /api/logs/frontend", s.recordFrontendLog)
 	api.HandleFunc("GET /api/local/download-path", s.defaultDownloadPath)
 	api.HandleFunc("POST /api/local/open-downloads", s.openDownloadDirectory)
 	api.HandleFunc("POST /api/local/choose-download-directory", s.chooseDownloadDirectory)

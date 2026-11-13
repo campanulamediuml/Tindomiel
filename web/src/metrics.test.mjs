@@ -54,7 +54,7 @@ function fakeCanvas(context) {
 
 function installDOM(t, elements) {
   defineGlobal(t, 'document', { getElementById: (id) => elements.get(id) });
-  defineGlobal(t, 'window', { devicePixelRatio: 2 });
+  defineGlobal(t, 'window', { devicePixelRatio: 2, innerWidth: 1280, innerHeight: 720 });
 }
 
 function sessionHistory(network = new Map(), ping = []) {
@@ -69,6 +69,7 @@ function networkPanel(target = { rx: [], tx: [], timestamps: [], maximum: 1 }) {
   panel.sessionId = 'session';
   panel.activeInterface = 'eth0';
   panel.snapshots = new Map();
+  panel.tooltip = { hidden: true, textContent: '', style: {}, offsetWidth: 0, offsetHeight: 0 };
   panel.histories = new Map([['session', sessionHistory(new Map([['eth0', target]]))]]);
   return panel;
 }
@@ -284,7 +285,6 @@ test('network time advances with zero samples and expires peaks after 40 seconds
 test('network chart shows the time range and exact sample timestamp on hover', (t) => {
   const context = fakeContext();
   const { canvas } = fakeCanvas(context);
-  canvas.title = '';
   canvas.getBoundingClientRect = () => ({ left: 0, width: 100 });
   const start = { textContent: '' };
   const end = { textContent: '' };
@@ -296,12 +296,18 @@ test('network chart shows the time range and exact sample timestamp on hover', (
   const panel = networkPanel({ rx: [50], tx: [25], timestamps: [2000], maximum: 100 });
 
   panel.drawNetwork();
-  panel.showNetworkTooltip({ currentTarget: canvas, clientX: 95 });
+  panel.showNetworkTooltip({ currentTarget: canvas, clientX: 95, clientY: 40 });
 
   const clock = new Date(2000 * 1000).toLocaleTimeString('zh-CN', { hour12: false });
   assert.equal(start.textContent, clock);
   assert.equal(end.textContent, clock);
-  assert.equal(canvas.title, `${clock}\n↑ 25 B/s ↓ 50 B/s`);
+  assert.equal(panel.tooltip.hidden, false);
+  assert.equal(panel.tooltip.textContent, `${clock}\n↑ 25 B/s\n↓ 50 B/s`);
+  assert.deepEqual(panel.tooltip.style, { left: '107px', top: '52px' });
+
+  panel.hideTooltip();
+  assert.equal(panel.tooltip.hidden, true);
+  assert.equal(panel.tooltip.textContent, '');
 });
 
 test('ping chart skips unchanged rendering without rereading layout', (t) => {
@@ -320,6 +326,61 @@ test('ping chart skips unchanged rendering without rereading layout', (t) => {
   panel.drawPing();
   assert.equal(context.calls.clearRect.length, 2);
   assert.deepEqual(reads(), { width: 1, height: 1 });
+});
+
+test('ping chart shows the nearest sample value on hover', (t) => {
+  const { canvas } = fakeCanvas(fakeContext());
+  canvas.getBoundingClientRect = () => ({ left: 10, width: 100 });
+  installDOM(t, new Map([['ping-chart', canvas]]));
+  const panel = networkPanel();
+  panel.histories.get('session').ping = [10, 20.25, 0];
+
+  panel.showPingTooltip({ currentTarget: canvas, clientX: 10, clientY: 20 });
+  assert.equal(panel.tooltip.textContent, 'Ping\n10.0 ms');
+  panel.showPingTooltip({ currentTarget: canvas, clientX: 60, clientY: 20 });
+  assert.equal(panel.tooltip.textContent, 'Ping\n20.3 ms');
+  panel.showPingTooltip({ currentTarget: canvas, clientX: 110, clientY: 20 });
+  assert.equal(panel.tooltip.textContent, 'Ping\n— ms');
+  panel.showPingTooltip({ currentTarget: canvas, clientX: -10, clientY: 20 });
+  assert.equal(panel.tooltip.textContent, 'Ping\n10.0 ms', 'positions before the chart select its first point');
+  panel.showPingTooltip({ currentTarget: canvas, clientX: 150, clientY: 20 });
+  assert.equal(panel.tooltip.textContent, 'Ping\n— ms', 'positions after the chart select its last point');
+  assert.equal(panel.tooltip.hidden, false);
+
+  panel.histories.get('session').ping = [];
+  panel.showPingTooltip({ currentTarget: canvas, clientX: 60, clientY: 20 });
+  assert.equal(panel.tooltip.hidden, true, 'empty history hides a stale tooltip');
+  assert.equal(panel.tooltip.textContent, '');
+});
+
+test('window restoration redraws unchanged charts after their canvas contents are lost', (t) => {
+  const networkContext = fakeContext();
+  const pingContext = fakeContext();
+  const network = fakeCanvas(networkContext);
+  const ping = fakeCanvas(pingContext);
+  installDOM(t, new Map([
+    ['network-chart', network.canvas],
+    ['ping-chart', ping.canvas],
+  ]));
+  const panel = networkPanel({ rx: [100], tx: [50], timestamps: [2000], maximum: 100 });
+  panel.histories.get('session').ping = [20];
+  panel.drawNetwork();
+  panel.drawPing();
+  assert.equal(networkContext.calls.clearRect.length, 1);
+  assert.equal(pingContext.calls.clearRect.length, 1);
+
+  panel.redrawCharts();
+  assert.equal(networkContext.calls.clearRect.length, 2, 'network redraws even when its history is unchanged');
+  assert.equal(pingContext.calls.clearRect.length, 2, 'ping redraws even when its history is unchanged');
+
+  globalThis.document.hidden = true;
+  panel.redrawCharts();
+  assert.equal(networkContext.calls.clearRect.length, 2, 'hidden windows do not draw');
+  assert.equal(pingContext.calls.clearRect.length, 2, 'hidden windows do not draw');
+  globalThis.document.hidden = false;
+  panel.redrawCharts();
+  assert.equal(networkContext.calls.clearRect.length, 3);
+  assert.equal(pingContext.calls.clearRect.length, 3);
 });
 
 test('clearView clears the current charts without deleting session history', (t) => {

@@ -21,6 +21,14 @@ export class Api {
     return this.request('GET', `/api/logs/recent?lines=${lines}`);
   }
 
+  recentFrontendLogs(lines = 200): Promise<{ log: string; path: string }> {
+    return this.request('GET', `/api/logs/frontend/recent?lines=${lines}`);
+  }
+
+  recordLog(message: string, level = 'info'): Promise<void> {
+    return this.request('POST', '/api/logs/frontend', { message, level });
+  }
+
   defaultDownloadPath(): Promise<{ path: string }> {
     return this.request('GET', '/api/local/download-path');
   }

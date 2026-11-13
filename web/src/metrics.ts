@@ -52,9 +52,14 @@ export class MetricsPanel {
   private sessionVersion = 0;
   private readonly processRows: ProcessRow[] = [];
   private readonly diskRows = new Map<string, DiskRow>();
+  private readonly tooltip: HTMLDivElement;
 
   constructor(private readonly api: Api, onError: (message: string) => void) {
     this.onError = onError;
+    this.tooltip = document.createElement('div');
+    this.tooltip.className = 'chart-tooltip';
+    this.tooltip.hidden = true;
+    document.body.append(this.tooltip);
     element<HTMLButtonElement>('sort-cpu').addEventListener('click', () => this.changeSort('cpu'));
     element<HTMLButtonElement>('sort-memory').addEventListener('click', () => this.changeSort('memory'));
     element<HTMLSelectElement>('network-interface').addEventListener('change', (event) => {
@@ -68,15 +73,16 @@ export class MetricsPanel {
       this.renderDialog();
       element<HTMLDialogElement>('metrics-dialog').showModal();
     });
-    new ResizeObserver(() => {
-      canvasGeometries.delete(element<HTMLCanvasElement>('network-chart'));
-      canvasGeometries.delete(element<HTMLCanvasElement>('ping-chart'));
-      this.drawNetwork();
-      this.drawPing();
-    }).observe(element<HTMLElement>('metrics-panel'));
+    new ResizeObserver(() => this.redrawCharts()).observe(element<HTMLElement>('metrics-panel'));
+    document.addEventListener('visibilitychange', () => this.redrawCharts());
+    window.addEventListener('focus', () => this.redrawCharts());
+    window.addEventListener('pageshow', () => this.redrawCharts());
     const networkCanvas = element<HTMLCanvasElement>('network-chart');
     networkCanvas.addEventListener('mousemove', (event) => this.showNetworkTooltip(event));
-    networkCanvas.addEventListener('mouseleave', () => { networkCanvas.title = ''; });
+    networkCanvas.addEventListener('mouseleave', () => this.hideTooltip());
+    const pingCanvas = element<HTMLCanvasElement>('ping-chart');
+    pingCanvas.addEventListener('mousemove', (event) => this.showPingTooltip(event));
+    pingCanvas.addEventListener('mouseleave', () => this.hideTooltip());
     window.setInterval(() => this.advanceNetworkTime(), 1000);
   }
 
@@ -401,18 +407,62 @@ export class MetricsPanel {
   private showNetworkTooltip(event: MouseEvent): void {
     const canvas = event.currentTarget as HTMLCanvasElement;
     const history = this.sessionId ? this.historyFor(this.sessionId).network.get(this.activeInterface) : undefined;
-    if (!history) return;
+    if (!history) {
+      this.hideTooltip();
+      return;
+    }
     history.timestamps ??= [];
     const bounds = canvas.getBoundingClientRect();
     const count = Math.min(history.timestamps.length, Math.floor(bounds.width / 5));
     const fromRight = Math.max(0, Math.ceil((bounds.width - (event.clientX - bounds.left)) / 5) - 1);
     const visibleIndex = count - fromRight - 1;
     if (visibleIndex < 0 || visibleIndex >= count) {
-      canvas.title = '';
+      this.hideTooltip();
       return;
     }
     const index = history.timestamps.length - count + visibleIndex;
-    canvas.title = `${formatClock(history.timestamps[index]!)}\n↑ ${formatRate(history.tx[index] ?? 0)} ↓ ${formatRate(history.rx[index] ?? 0)}`;
+    this.showTooltip(event, `${formatClock(history.timestamps[index]!)}\n↑ ${formatRate(history.tx[index] ?? 0)}\n↓ ${formatRate(history.rx[index] ?? 0)}`);
+  }
+
+  private showPingTooltip(event: MouseEvent): void {
+    const canvas = event.currentTarget as HTMLCanvasElement;
+    const values = this.sessionId ? this.historyFor(this.sessionId).ping : [];
+    if (values.length === 0) {
+      this.hideTooltip();
+      return;
+    }
+    const bounds = canvas.getBoundingClientRect();
+    const position = bounds.width > 0 ? (event.clientX - bounds.left) / bounds.width : 0;
+    const index = Math.round(Math.min(1, Math.max(0, position)) * (values.length - 1));
+    const value = values[index] ?? 0;
+    this.showTooltip(event, `Ping\n${value > 0 ? `${value.toFixed(1)} ms` : '— ms'}`);
+  }
+
+  private showTooltip(event: MouseEvent, text: string): void {
+    this.tooltip.textContent = text;
+    this.tooltip.hidden = false;
+    const maxLeft = Math.max(8, window.innerWidth - this.tooltip.offsetWidth - 8);
+    const maxTop = Math.max(8, window.innerHeight - this.tooltip.offsetHeight - 8);
+    this.tooltip.style.left = `${Math.max(8, Math.min(event.clientX + 12, maxLeft))}px`;
+    this.tooltip.style.top = `${Math.max(8, Math.min(event.clientY + 12, maxTop))}px`;
+  }
+
+  private hideTooltip(): void {
+    this.tooltip.hidden = true;
+    this.tooltip.textContent = '';
+  }
+
+  private redrawCharts(): void {
+    if (document.hidden) return;
+    this.hideTooltip();
+    const network = element<HTMLCanvasElement>('network-chart');
+    const ping = element<HTMLCanvasElement>('ping-chart');
+    canvasGeometries.delete(network);
+    canvasGeometries.delete(ping);
+    canvasRenderSignatures.delete(network);
+    canvasRenderSignatures.delete(ping);
+    this.drawNetwork();
+    this.drawPing();
   }
 
   private drawNetwork(): void {
@@ -440,6 +490,7 @@ export class MetricsPanel {
   private clearView(): void {
     this.latest = undefined;
     this.activeInterface = '';
+    this.hideTooltip();
     setText(element<HTMLDivElement>('system-uptime'), '运行 —');
     setText(element<HTMLDivElement>('system-load'), '负载 —');
     setText(element<HTMLSpanElement>('cpu-text'), '—');

@@ -54,13 +54,13 @@ async function start(): Promise<void> {
     if ('__TAURI_INTERNALS__' in window) {
       const { listen } = await import('@tauri-apps/api/event');
       await listen('open-settings', () => appSettings.open());
-      void startAppMetrics();
     }
     for (const id of ['network-interface', 'auth-method', 'profile-folder', 'settings-theme']) {
       new CustomSelect(element<HTMLSelectElement>(id));
     }
     transfers = new TransferCenter();
     new LogCenter(api);
+    if ('__TAURI_INTERNALS__' in window) void startAppMetrics();
     metrics = new MetricsPanel(api, showToast);
     sftp = new SftpPanel(api, transfers, showToast);
     connections = new ConnectionManager(api, (profile) => void connect(profile), showToast);

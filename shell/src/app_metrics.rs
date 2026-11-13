@@ -18,9 +18,16 @@ pub struct AppMetrics {
     pub cpu_percent: Option<f64>,
     pub memory_bytes: u64,
     pub process_count: usize,
+    pub cpu_time_ns: u64,
+    pub previous_cpu_time_ns: Option<u64>,
+    pub sample_interval_ns: Option<u64>,
+    pub processes: Vec<ProcessUsage>,
 }
 
-struct ProcessUsage {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessUsage {
+    pid: i32,
     cpu_time_ns: u64,
     memory_bytes: u64,
 }
@@ -36,6 +43,12 @@ impl AppMetricsState {
         let process_count = processes.len();
         let now = Instant::now();
         let mut previous = self.previous.lock().map_err(|_| "metrics lock failed")?;
+        let previous_cpu_time_ns = previous.as_ref().map(|sample| sample.cpu_time_ns);
+        let sample_interval_ns = previous.as_ref().map(|sample| {
+            now.duration_since(sample.at)
+                .as_nanos()
+                .min(u64::MAX as u128) as u64
+        });
         let cpu_percent = previous.as_ref().and_then(|sample| {
             cpu_percent(
                 sample.cpu_time_ns,
@@ -51,6 +64,10 @@ impl AppMetricsState {
             cpu_percent,
             memory_bytes,
             process_count,
+            cpu_time_ns,
+            previous_cpu_time_ns,
+            sample_interval_ns,
+            processes,
         })
     }
 }
@@ -67,6 +84,10 @@ fn absolute_time_ns(time: u64, numer: u32, denom: u32) -> u64 {
         return 0;
     }
     ((time as u128 * numer as u128 / denom as u128).min(u64::MAX as u128)) as u64
+}
+
+fn pid_count(result: i32) -> usize {
+    usize::try_from(result).unwrap_or(0)
 }
 
 #[cfg(target_os = "macos")]
@@ -107,21 +128,21 @@ fn process_usages(owner: i32) -> Vec<ProcessUsage> {
     if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase.denom == 0 {
         return Vec::new();
     }
-    let bytes = unsafe { proc_listallpids(null_mut(), 0) };
-    if bytes <= 0 {
+    let count = unsafe { proc_listallpids(null_mut(), 0) };
+    if count <= 0 {
         return Vec::new();
     }
-    let mut pids = vec![0_i32; bytes as usize / size_of::<i32>() + 16];
-    let bytes = unsafe {
+    let mut pids = vec![0_i32; pid_count(count) + 16];
+    let count = unsafe {
         proc_listallpids(
             pids.as_mut_ptr().cast(),
             (pids.len() * size_of::<i32>()) as c_int,
         )
     };
-    if bytes <= 0 {
+    if count <= 0 {
         return Vec::new();
     }
-    pids.truncate((bytes as usize / size_of::<i32>()).min(pids.len()));
+    pids.truncate(pid_count(count).min(pids.len()));
     pids.into_iter()
         .filter(|pid| {
             *pid == owner
@@ -136,6 +157,7 @@ fn process_usages(owner: i32) -> Vec<ProcessUsage> {
                 return None;
             }
             Some(ProcessUsage {
+                pid,
                 cpu_time_ns: absolute_time_ns(
                     usage.user_time.saturating_add(usage.system_time),
                     timebase.numer,
@@ -171,6 +193,13 @@ mod tests {
         assert_eq!(absolute_time_ns(100, 1, 0), 0);
     }
 
+    #[test]
+    fn proc_list_results_are_pid_counts_not_byte_counts() {
+        assert_eq!(pid_count(928), 928);
+        assert_eq!(pid_count(1), 1);
+        assert_eq!(pid_count(-1), 0);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn samples_the_current_process_and_its_children() {
@@ -178,6 +207,13 @@ mod tests {
         let first = state.sample().expect("first sample");
         assert!(first.memory_bytes > 0);
         assert!(first.process_count > 0);
+        assert_eq!(first.process_count, first.processes.len());
+        assert!(
+            first
+                .processes
+                .iter()
+                .any(|process| process.pid == std::process::id() as i32)
+        );
         assert_eq!(first.cpu_percent, None);
         let busy_until = Instant::now() + std::time::Duration::from_millis(5);
         while Instant::now() < busy_until {

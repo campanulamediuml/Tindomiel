@@ -42,6 +42,12 @@ func main() {
 	}
 	slog.SetDefault(logger)
 	defer closeLog()
+	frontendLogPath := envOr("TINDOMIEL_FRONTEND_LOG", filepath.Join(filepath.Dir(logPath), "frontend.log"))
+	frontendLogger, closeFrontendLog, err := logging.Setup(frontendLogPath, os.Getenv("TINDOMIEL_LOG_LEVEL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer closeFrontendLog()
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -56,7 +62,7 @@ func main() {
 	}
 	profiles := configstore.New(dataPath)
 	manager := session.NewManager(profiles, hostKeys)
-	api := httpapi.New(token, *staticDir, profiles, manager, hostKeys, logPath)
+	api := httpapi.New(token, *staticDir, profiles, manager, hostKeys, logPath, frontendLogPath, frontendLogger)
 
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {

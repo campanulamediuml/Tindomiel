@@ -84,8 +84,8 @@ Tauri 负责启动、停止 Go sidecar，并通过安全的进程通道传递访
   - 普通快照通过 WS `metrics` 控制帧推送，网络样本通过独立 `network` 帧推送；REST 只读取最近缓存并附带最近网络结果，初次缓存尚未建立时才同步采集
   - 网络样本携带本机 Unix 秒级业务时间戳，仅用于图表对齐和排序，不依赖远端时钟；前端按 `sessionId` 保存最近快照、各网卡最近 40 秒连续时间轴、ping 历史和网卡选择，同一秒覆盖、缺秒补 0、窗口内迟到样本按原时间回填，后台标签也按时间推进；隐藏标签只更新内存、不渲染 DOM，切换标签直接展示已有曲线，不触发远端采集
 - **Logging**
-  - 后端输出 JSON Lines 到标准错误和日志文件，单个文件达到 4 MiB 后轮转，启动时及运行期间每小时清理超过 3 天的备份
-  - 前端将界面事件写入 localStorage，最多保留 300 条且只保留最近 3 天
+  - 后端和前端分别输出 JSON Lines 到同目录下的 `tindomiel.log` 与 `frontend.log`，单个文件达到 4 MiB 后轮转，启动时及运行期间每小时清理超过 3 天的备份
+  - 前端事件通过 REST 写入独立前端日志，查看界面读取当前文件末尾，不合并历史轮转文件
   - 日志包含连接地址、认证方式、会话状态、错误和重连过程，不记录 token、密码、私钥内容或私钥短语
 
 ## 断线与终端画面
@@ -132,7 +132,7 @@ WebSocket 异常关闭不等于 SSH 会话关闭。前端重新加载后可以�
 
 ## 日志与 macOS 桌面权限
 
-后端默认日志路径为 `.tools/logs/tindomiel.log`（浏览器开发）或 `~/Library/Application Support/Tindomiel/logs/tindomiel.log`（桌面应用），可通过 `TINDOMIEL_LOG` 覆盖。`TINDOMIEL_LOG_LEVEL=debug|info|warn|error` 控制日志级别。右上角“日志”通过 REST 读取当前后端日志末尾，并展示前端事件。
+后端默认日志路径为 `.tools/logs/tindomiel.log`（浏览器开发）或 `~/Library/Application Support/Tindomiel/logs/tindomiel.log`（桌面应用），可通过 `TINDOMIEL_LOG` 覆盖；前端日志使用同目录的 `frontend.log`，可通过 `TINDOMIEL_FRONTEND_LOG` 覆盖。`TINDOMIEL_LOG_LEVEL=debug|info|warn|error` 控制日志级别。右上角“日志”通过 REST 分别读取当前前后端日志末尾。
 
 桌面 App 的 `Info.plist` 必须包含 `NSLocalNetworkUsageDescription`。发布构建对整个 `.app` 和嵌套 Go sidecar 执行 `codesign --force --deep --sign -`，让 macOS 正确归属本地网络权限。若浏览器可连接而桌面 App 报 `connect: no route to host`，先检查本地网络权限、嵌套 sidecar 签名和桌面日志中的 `ssh_dial_failed`，不要先假定目标主机不可达。
 
@@ -157,7 +157,7 @@ web/
 │   ├── connection.ts      # 连接管理、右键菜单和应用内删除确认
 │   ├── custom-select.ts   # 统一暗色下拉组件
 │   ├── metrics.ts         # 每秒监控、排序和资源图表
-│   ├── logs.ts            # 前后端日志查看与前端日志保留
+│   ├── logs.ts            # 前后端日志查看与前端日志上传
 │   ├── sftp.ts
 │   └── main.ts            # 多标签与独立会话生命周期
 └── package.json

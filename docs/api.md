@@ -84,9 +84,16 @@ PUT /api/settings
 ```
 GET /api/logs/recent?lines=300
 → { "log": "{\"time\":\"...\",\"level\":\"INFO\",\"msg\":\"ssh_dial_success\",...}\n...", "path": "/.../logs/tindomiel.log" }
+
+GET /api/logs/frontend/recent?lines=300
+→ { "log": "{\"time\":\"...\",\"level\":\"INFO\",\"msg\":\"frontend_event\",...}\n...", "path": "/.../logs/frontend.log" }
+
+POST /api/logs/frontend
+{ "message": "界面事件内容", "level": "info" }
+→ { "ok": true }
 ```
 
-`lines` 默认 200，可设置为 1–1000。接口返回当前日志文件的末尾内容，不合并历史轮转文件。后端日志为 JSON Lines，单个文件达到 4 MiB 后轮转，超过 3 天的备份自动清理；日志不包含 token、密码、私钥内容或私钥短语。前端界面事件单独保存在 localStorage，不通过该接口上传。
+`lines` 默认 200，可设置为 1–1000。接口返回当前日志文件的末尾内容，不合并历史轮转文件。前后端日志均为 JSON Lines，分别写入 `tindomiel.log` 与 `frontend.log`，单个文件达到 4 MiB 后轮转，超过 3 天的备份自动清理；日志不包含 token、密码、私钥内容或私钥短语。前端日志级别支持 `debug|info|warn|error`，其他值按 `info` 记录。
 
 ### 会话（sessions）
 

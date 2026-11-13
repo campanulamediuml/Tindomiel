@@ -116,11 +116,12 @@
 | 应用设置、下载目录、默认打开应用、隐藏的 OpenSSH 连接 | `~/Library/Application Support/Tindomiel/preferences.json` |
 | 缓存编辑文件 | `~/Library/Caches/Tindomiel/` |
 | 普通下载 | 初始为 `~/Downloads`，可在右上角更改 |
-| 日志 | `~/Library/Application Support/Tindomiel/logs/tindomiel.log` |
+| 后端日志 | `~/Library/Application Support/Tindomiel/logs/tindomiel.log` |
+| 界面日志 | `~/Library/Application Support/Tindomiel/logs/frontend.log` |
 
 ### 8. 日志与故障排查
 
-点击右上角“日志”可分别查看后端日志和界面日志。后端单个日志文件达到 4 MiB 后轮转，备份保留 3 天；界面事件也只保留最近 3 天。日志不记录 token、密码、私钥内容或私钥短语。
+点击右上角“日志”可分别查看后端日志和界面日志。两者分别写入独立文件，单个日志文件达到 4 MiB 后轮转，备份均保留 3 天；查看界面展示当前文件末尾，历史备份可在日志目录中查看。日志不记录 token、密码、私钥内容或私钥短语。
 
 常见问题：
 
@@ -212,12 +213,12 @@ npm run tauri:build
 
 ## 日志
 
-后端使用 JSON Lines 结构化日志，同时写入标准错误和文件。默认路径：
+前后端使用 JSON Lines 结构化日志。后端日志同时写入标准错误和文件，默认路径：
 
-- 浏览器开发环境：`.tools/logs/tindomiel.log`
-- 桌面应用：`~/Library/Application Support/Tindomiel/logs/tindomiel.log`
+- 浏览器开发环境：`.tools/logs/tindomiel.log` 与 `.tools/logs/frontend.log`
+- 桌面应用：`~/Library/Application Support/Tindomiel/logs/tindomiel.log` 与 `~/Library/Application Support/Tindomiel/logs/frontend.log`
 
-可通过 `TINDOMIEL_LOG` 指定路径，通过 `TINDOMIEL_LOG_LEVEL=debug|info|warn|error` 调整级别。单文件达到 4 MiB 后轮转，超过 3 天的备份日志自动清理。界面事件在 localStorage 中同样只保留最近 3 天，可在右上角“日志”中分别查看后端日志和界面日志。
+可通过 `TINDOMIEL_LOG`、`TINDOMIEL_FRONTEND_LOG` 分别指定路径，通过 `TINDOMIEL_LOG_LEVEL=debug|info|warn|error` 调整级别。两个日志均按单文件 4 MiB 轮转，超过 3 天的备份自动清理，可在右上角“日志”中分别查看当前文件末尾。
 
 日志记录连接地址、认证方式、连接成功/失败、会话状态及重连过程，不记录 token、密码、私钥内容或私钥短语。典型事件包括 `ssh_dial_start`、`ssh_dial_failed`、`ssh_dial_success`、`session_ready`、`session_disconnected` 和 `session_reconnect_failed`。
 

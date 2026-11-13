@@ -109,6 +109,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .chart-time-range { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 #ping-chart { height: 48px; }
 #ping-text { color: #79c0ff; }
+.chart-tooltip { position: fixed; z-index: 1000; max-width: 240px; padding: 7px 9px; pointer-events: none; color: var(--text); background: #242932; border: 1px solid #3b4350; border-radius: 5px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45); font-size: 12px; line-height: 1.55; font-variant-numeric: tabular-nums; white-space: pre-line; }
 .disk-header { display: flex; justify-content: space-between; margin-top: 12px; padding: 5px 0; color: var(--accent); border-bottom: 1px solid var(--border); }
 .disk-row { padding: 5px 0; border-bottom: 1px solid rgba(38, 42, 49, 0.5); }
 .disk-row > div:first-child { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
